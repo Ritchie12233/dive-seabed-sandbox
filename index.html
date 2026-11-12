@@ -330,7 +330,8 @@ const ZONE_TYPES = {
  * ========================================================================== */
 const $ = id => document.getElementById(id);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
+// 让出一帧给界面刷新；页面在后台标签页时 requestAnimationFrame 不触发，所以加一个定时器兜底，避免加载卡住
+const nextFrame = () => new Promise(r => { requestAnimationFrame(() => r()); setTimeout(r, 120); });
 const hex = c => '#' + c.toString(16).padStart(6, '0');
 
 /** 带超时的 fetch：超时或失败都会 reject，由调用方决定是否静默 */
