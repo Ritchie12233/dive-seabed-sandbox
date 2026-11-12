@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Dive Seabed Sandbox 潜水潜点海底3D沙盘</title>
 <!--
   ============================================================================
@@ -24,7 +24,8 @@
 <style>
   /* ---------- 基础 ---------- */
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #020b16; color: #fff;
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #020b16; color: #fff; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
     font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; font-size: 13px; }
   #stage { position: fixed; inset: 0; }
   #stage canvas { display: block; width: 100%; height: 100%; }
@@ -47,7 +48,9 @@
   #legend img, #legend i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; flex: none; }
 
   /* ---------- 右侧：控制面板 ---------- */
-  #ctrl { top: 12px; right: 12px; width: 236px; padding: 10px 12px; max-height: calc(100vh - 190px); overflow-y: auto; }
+  #panelToggle { top: 12px; right: 12px; width: 40px; height: 40px; font-size: 18px; padding: 0; z-index: 12; color: #fff; }
+  #ctrl { top: 60px; right: 12px; width: 236px; padding: 10px 12px; max-height: calc(100vh - 240px); max-height: calc(100dvh - 240px); overflow-y: auto; }
+  #ctrl.collapsed { display: none; }
   #ctrl h2 { margin: 10px 0 6px; font-size: 12px; font-weight: 600; color: rgba(255,255,255,.6);
     border-bottom: 1px solid rgba(255,255,255,.12); padding-bottom: 4px; }
   #ctrl h2:first-child { margin-top: 0; }
@@ -111,9 +114,33 @@
   #disclaimer { position: fixed; left: 0; right: 0; bottom: 6px; text-align: center; font-size: 11px;
     color: rgba(255,255,255,.55); z-index: 5; padding: 0 12px; pointer-events: none; text-shadow: 0 1px 2px #000; }
 
+  /* ---------- 潜水视角：信息条 + 屏幕方向键 ---------- */
+  #diveInfo { top: 12px; left: 50%; transform: translateX(-50%); padding: 7px 10px; display: flex; gap: 8px; align-items: center; white-space: nowrap; z-index: 14; }
+  #diveInfo b { color: #8fd8ff; font-variant-numeric: tabular-nums; }
+  #diveInfo button { padding: 4px 9px; }
+  .pad { position: fixed; bottom: 44px; z-index: 14; display: grid; gap: 8px; }
+  #padMove { left: 14px; grid-template-columns: repeat(3, 54px); grid-template-rows: repeat(2, 54px); }
+  #padVert { right: 14px; grid-template-columns: 54px; grid-template-rows: repeat(2, 54px); }
+  .pad button { font-size: 20px; padding: 0; border-radius: 12px; background: rgba(6,20,34,.62); touch-action: none; }
+  .pad button:active, .pad button.down { background: #1f86b8; }
+  .pad small { display: block; font-size: 10px; opacity: .7; margin-top: -2px; }
+  body.diving #spotBar, body.diving #tide, body.diving #satCredit, body.diving #panelToggle, body.diving #ctrl, body.diving #toolHint { display: none !important; }
+  body.diving #stage canvas { cursor: grab; }
+
+  /* ---------- 手机 / 窄屏 ---------- */
   @media (max-width: 720px) {
-    #ctrl { width: 200px; } #tide { width: 200px; }
+    #spotBar { max-width: calc(100vw - 76px); padding: 8px 10px; }
+    #spotBar h1 { font-size: 12px; margin-bottom: 6px; }
+    #spotBar h1::after { content: " ⓘ"; opacity: .6; }
+    #spotBar:not(.open) #legend, #spotBar:not(.open) #spotSource { display: none; }      /* 图例和数据来源默认收起，点标题展开 */
+    #ctrl { width: min(236px, calc(100vw - 24px)); }
+    #tide { width: 168px; padding: 8px 10px; } #tide small { display: none; } #tide .big { font-size: 16px; }
     #profile { right: 12px; left: 12px; width: auto; max-width: none; bottom: 34px; }
+    #profileCanvas { height: 170px; }
+    #measureBox { top: 104px; } #toolHint { top: 60px; max-width: calc(100vw - 24px); }
+    #disclaimer { font-size: 9.5px; bottom: 4px; }
+    #satCredit { display: none; }
+    #diveInfo { font-size: 12px; gap: 6px; max-width: calc(100vw - 16px); }
   }
 </style>
 </head>
@@ -129,6 +156,9 @@
   <div id="legend"></div>
   <div id="spotSource"></div>
 </div>
+
+<!-- 右上角：控制面板的显示 / 隐藏按钮（手机上面板默认收起） -->
+<button id="panelToggle" class="panel" aria-label="显示或隐藏控制面板" title="显示 / 隐藏控制面板">☰</button>
 
 <!-- 右侧：控制面板 -->
 <div id="ctrl" class="panel">
@@ -154,6 +184,7 @@
 
   <h2>③ 工具</h2>
   <div class="btns">
+    <button id="btnDive" class="wide">🤿 潜水视角（进入水下）</button>
     <button id="btnMeasure">测距</button>
     <button id="btnProfile">剖面</button>
     <button id="btnReset">重置视角</button>
@@ -199,6 +230,21 @@
   <button class="x" id="profileClose" title="关闭">×</button>
   <h3 id="profileTitle">地形剖面</h3>
   <canvas id="profileCanvas"></canvas>
+</div>
+
+<!-- 潜水视角的界面：顶部信息条 + 左下移动键 + 右下升降键 -->
+<div id="diveHud" hidden>
+  <div id="diveInfo" class="panel">
+    <span>深度 <b id="dvDepth">0.0</b> m</span><span>海底 <b id="dvBottom">0.0</b> m</span><span><b id="dvHead">N</b></span>
+    <button id="dvFast">加速</button><button id="dvExit">上浮退出</button>
+  </div>
+  <div id="padMove" class="pad">
+    <span></span><button data-k="f" aria-label="前进">▲</button><span></span>
+    <button data-k="l" aria-label="左移">◀</button><button data-k="b" aria-label="后退">▼</button><button data-k="r" aria-label="右移">▶</button>
+  </div>
+  <div id="padVert" class="pad">
+    <button data-k="u" aria-label="上升">⤒<small>上升</small></button><button data-k="d" aria-label="下潜">⤓<small>下潜</small></button>
+  </div>
 </div>
 
 <!-- 卫星影像署名（贴图显示时出现） -->
@@ -426,6 +472,9 @@ function main(THREE, OrbitControls) {
     toolPts: [],
     loadToken: 0,       // 切换潜点时自增，用于丢弃过期的异步结果
   };
+
+  // 潜水视角的状态
+  const DIVE = { on: false, yaw: 0, pitch: 0, pos: null, keys: {}, fast: false, saved: null };
 
   /* ---------- 3.2 渲染器 / 场景 / 相机 / 控制器 ---------- */
   const stage = $('stage');
@@ -676,6 +725,9 @@ function main(THREE, OrbitControls) {
     uSatMix: { value: 0 },                          // 0 = 不用卫星图，1 = 用
     uSize:   { value: new THREE.Vector2(1, 1) },    // 地形东西 / 南北长度（米）
     uSunDir: { value: new THREE.Vector3(-0.45, 0.82, -0.29).normalize() },
+    uUnder:  { value: 0 },                          // 1 = 潜水视角（相机在水下）
+    uFogCol: { value: new THREE.Color(0x0a3554) },  // 水下雾色，供自写着色器的水面使用
+    uFogDen: { value: 0.0003 },
   };
 
   /** 给标准 PBR 材质注入写实着色（只在 uReal / uSatMix 打开时生效，关闭时与原来完全一样） */
@@ -726,13 +778,21 @@ function main(THREE, OrbitControls) {
               float c2 = texture2D(uNoise, pq / 17.0 - vec2(uTime * 0.017, -uTime * 0.019)).g;
               col += col * pow(1.0 - abs(c1 - c2), 14.0) * 1.3 * exp(-wd * 0.10) * (1.0 - smoothstep(0.6, 3.0, fp));
             }
+            // ⑥ 贴近海底时再叠两层更细的颗粒（分米级），否则近看是一片糊
+            float nearK = 1.0 - smoothstep(0.03, 0.5, fp);
+            if (uReal > 0.5 && nearK > 0.0) {
+              float d1 = texture2D(uNoise, pr / 1.9 + 0.23).r, d2 = texture2D(uNoise, pq / 0.43).g;
+              col *= mix(1.0, 0.72 + 0.34 * d1 + 0.22 * d2, nearK);
+            }
             diffuseColor.rgb = col;
           }`)
         .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
           if (uReal > 0.5) {   // 细颗粒凹凸：让沙地 / 礁石表面有受光起伏
             float fpn = max(fwidth(vWPos.x), fwidth(vWPos.z));
             vec3 g = texture2D(uNoise, mat2(0.28, 0.96, -0.96, 0.28) * vWPos.xz / 11.3).rgb - 0.5;
-            normal = normalize(normal + (viewMatrix * vec4(g.x, 0.0, g.y, 0.0)).xyz * 0.45 * (1.0 - smoothstep(1.0, 6.0, fpn)));
+            vec3 g2 = texture2D(uNoise, mat2(0.80, -0.60, 0.60, 0.80) * vWPos.xz / 1.7).rgb - 0.5;      // 近看才出现的小起伏
+            g.xy = g.xy * (1.0 - smoothstep(1.0, 6.0, fpn)) + g2.xy * 1.2 * (1.0 - smoothstep(0.03, 0.4, fpn));
+            normal = normalize(normal + (viewMatrix * vec4(g.x, 0.0, g.y, 0.0)).xyz * 0.45);
           }`);
     };
   }
@@ -743,7 +803,7 @@ function main(THREE, OrbitControls) {
       uniforms: FX, transparent: true, depthWrite: false, side: THREE.DoubleSide,
       vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
       fragmentShader: `
-        varying vec3 vW; uniform float uTime; uniform sampler2D uNoise; uniform vec3 uSunDir;
+        varying vec3 vW; uniform float uTime, uUnder, uFogDen; uniform sampler2D uNoise; uniform vec3 uSunDir, uFogCol;
         void main(){
           vec2 p = vW.xz;
           float fp = max(fwidth(p.x), fwidth(p.y));
@@ -752,7 +812,16 @@ function main(THREE, OrbitControls) {
           vec3 b = texture2D(uNoise, mat2(0.28, 0.96, -0.96, 0.28) * p / 19.0 - vec2(uTime * 0.016, -uTime * 0.011)).rgb;
           vec3 N = normalize(vec3((a.r + b.g - 1.0) * 0.55 * k, 1.0, (a.g + b.b - 1.0) * 0.55 * k));
           vec3 V = normalize(cameraPosition - vW);
-          if (V.y < 0.0) { V.y = -V.y; }                       // 相机在水下时从下往上看
+          if (uUnder > 0.5) {
+            // 从水下往上看：正上方一圈是明亮的“斯涅尔窗”，越往四周越暗；再按距离融进水色
+            float c = clamp(dot(vec3(N.x, -N.y, N.z), V), 0.0, 1.0);
+            vec3 col = mix(vec3(0.02, 0.20, 0.33), vec3(0.74, 0.94, 1.0), smoothstep(0.52, 0.82, c));
+            float f = 1.0 - exp(-pow(length(cameraPosition - vW) * uFogDen, 2.0));
+            gl_FragColor = vec4(mix(col, uFogCol, f), 0.96);
+            #include <colorspace_fragment>
+            return;
+          }
+          if (V.y < 0.0) { V.y = -V.y; }
           float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0);
           float spec = pow(max(dot(reflect(-uSunDir, N), V), 0.0), 90.0) * k * 0.35;
           vec3 col = mix(vec3(0.05, 0.36, 0.52), vec3(0.55, 0.76, 0.90), fres) + vec3(1.0, 0.97, 0.90) * spec * 0.9;
@@ -862,7 +931,7 @@ function main(THREE, OrbitControls) {
   const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3();
   function updateMarkers() {
     if (!S.grid) return;
-    const size = S.geo.span * 0.013;
+    const size = DIVE.on ? 0.8 : S.geo.span * 0.013;         // 潜水视角里用接近真实的大小（约 0.8 m）
     markerGroup.children.forEach(mesh => {
       mesh.userData.items.forEach((it, i) => {
         const y = -sampleDepth(it.x, it.z) * S.exag + size * 1.3;
@@ -950,7 +1019,7 @@ function main(THREE, OrbitControls) {
     const items = group.userData.items;
     if (!items || group.children.length < 2 || !S.grid) return;
     const [shaft, head] = group.children;
-    const L0 = S.geo.span * 0.03;                       // 箭头基准尺寸
+    const L0 = DIVE.on ? 1.4 : S.geo.span * 0.03;       // 箭头基准尺寸（潜水视角里缩到米级）
     items.forEach((it, i) => {
       const len = L0 * (0.4 + 1.6 * Math.min(it.speed, 2.5));     // 流速 → 箭杆长度（m/s 线性映射，2.5 m/s 封顶）
       const rad = it.dir * Math.PI / 180;
@@ -976,6 +1045,7 @@ function main(THREE, OrbitControls) {
 
   /** 卸载当前潜点的全部内容（地形、标记、区域、箭头、工具） */
   function disposeSpot() {
+    exitDive();
     cancelTool();
     closeProfile(); $('measureBox').hidden = true; $('card').hidden = true;
     if (terrainMesh) { scaledGroup.remove(terrainMesh); terrainMesh.geometry.dispose(); terrainMesh.material.dispose(); terrainMesh = null; }
@@ -1116,7 +1186,7 @@ function main(THREE, OrbitControls) {
    * ======================================================================== */
 
   function applyExaggeration() {
-    scaledGroup.scale.y = Math.max(S.exag, 0.001);     // 不取 0，避免矩阵不可逆导致射线拾取失效
+    scaledGroup.scale.y = DIVE.on ? 1 : Math.max(S.exag, 0.001);     // 潜水视角固定 1:1 真实比例；平时不取 0，避免射线拾取失效
     updateMarkers(); updateArrowLayer(seasonGroup); updateArrowLayer(realtimeGroup);
     renderer.shadowMap.needsUpdate = true;             // 地形形状变了，阴影重算一次
   }
@@ -1125,16 +1195,19 @@ function main(THREE, OrbitControls) {
   function applyFog() {
     const v = Number($('fog').value); $('fogOut').textContent = v;
     const span = S.geo ? S.geo.span : 2000;
-    scene.fog.density = (v / 100) * 2.2 / span;        // 浓度按潜点尺寸归一化，大小潜点观感一致
+    scene.fog.density = DIVE.on
+      ? 0.016 + (v / 100) * 0.07                       // 潜水视角：滑块 0 ≈ 能见度 60 m，滑块 100 ≈ 能见度 12 m
+      : (v / 100) * 2.2 / span;                        // 俯视：浓度按潜点尺寸归一化，大小潜点观感一致
+    FX.uFogDen.value = scene.fog.density;
   }
   $('fog').oninput = applyFog;
 
   /** 图层开关：关闭即把整组 visible 设为 false，几何体不再提交给 GPU */
   function applyLayerVisibility() {
-    contourGroup.visible  = $('chkContour').checked;
-    if (waterMesh) waterMesh.visible = $('chkWater').checked;
+    contourGroup.visible  = $('chkContour').checked && !DIVE.on;      // 水下视角不画等深线和分区色块
+    if (waterMesh) waterMesh.visible = $('chkWater').checked || DIVE.on;
     markerGroup.visible   = $('chkMarkers').checked;
-    zoneGroup.visible     = $('chkZones').checked;
+    zoneGroup.visible     = $('chkZones').checked && !DIVE.on;
     seasonGroup.visible   = $('chkSeason').checked;
     realtimeGroup.visible = $('chkRealtime').checked && !$('rowRealtime').hidden;
     if (!markerGroup.visible && !zoneGroup.visible) $('card').hidden = true;
@@ -1206,7 +1279,7 @@ function main(THREE, OrbitControls) {
   function doHover() {
     hoverQueued = false;
     const ev = hoverEvent;
-    if (!ev || !S.grid || pointerIsDown) { $('card').hidden = true; return; }
+    if (!ev || !S.grid || pointerIsDown || DIVE.on) { $('card').hidden = true; return; }
     setRay(ev);
     // 先找标记
     if (markerGroup.visible) {
@@ -1238,15 +1311,34 @@ function main(THREE, OrbitControls) {
 
   // 区分“点击”和“拖拽旋转”：按下与抬起位置相差很小才算点击
   let downX = 0, downY = 0;
-  renderer.domElement.addEventListener('pointerdown', ev => { pointerIsDown = true; downX = ev.clientX; downY = ev.clientY; $('card').hidden = true; });
-  window.addEventListener('pointerup', ev => {
+  let lookX = 0, lookY = 0, lookId = null;
+  renderer.domElement.addEventListener('pointerdown', ev => {
+    pointerIsDown = true; downX = ev.clientX; downY = ev.clientY; $('card').hidden = true;
+    if (DIVE.on && lookId === null) { lookId = ev.pointerId; lookX = ev.clientX; lookY = ev.clientY; }
+  });
+  // 潜水视角：拖动画面 = 转头（像街景那样“抓着画面拖”）
+  window.addEventListener('pointermove', ev => {
+    if (!DIVE.on || ev.pointerId !== lookId) return;
+    DIVE.yaw   -= (ev.clientX - lookX) * 0.0045;
+    DIVE.pitch  = clamp(DIVE.pitch + (ev.clientY - lookY) * 0.0040, -1.35, 1.35);
+    lookX = ev.clientX; lookY = ev.clientY;
+  });
+  const endPointer = ev => {
+    if (ev.pointerId === lookId) lookId = null;
     const wasDown = pointerIsDown; pointerIsDown = false;
-    if (!wasDown || ev.button !== 0 || !S.tool || !terrainMesh) return;
-    if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > 5) return;
+    if (!wasDown || DIVE.on || ev.button !== 0 || !terrainMesh) return;
+    if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > 6) return;      // 拖动过就不算点击
+    if (!S.tool) {                                                           // 触屏没有“悬浮”，点一下也弹出标记卡片
+      if (ev.pointerType !== 'mouse') { hoverEvent = ev; doHover(); }
+      return;
+    }
     setRay(ev);
     const hit = raycaster.intersectObject(terrainMesh, false)[0];
-    if (hit) onToolPoint(hit.point.x, hit.point.z);
-  });
+    if (!hit) return;
+    if (S.tool === 'dive') enterDive(hit.point.x, hit.point.z); else onToolPoint(hit.point.x, hit.point.z);
+  };
+  window.addEventListener('pointerup', endPointer);
+  window.addEventListener('pointercancel', ev => { if (ev.pointerId === lookId) lookId = null; pointerIsDown = false; });
 
   /* ==========================================================================
    * 第 10 段：测距工具 & 剖面工具
@@ -1254,6 +1346,7 @@ function main(THREE, OrbitControls) {
   const TOOL_TEXT = {
     measure: ['测距：在地形上点击第 1 个点', '测距：再点击第 2 个点'],
     profile: ['剖面：在地形上点击起点 A', '剖面：再点击终点 B'],
+    dive:    ['潜水视角：点一下地形，选择入水位置'],
   };
   function setTool(name) {
     const next = S.tool === name ? null : name;        // 再点一次同一个按钮 = 退出
@@ -1261,7 +1354,9 @@ function main(THREE, OrbitControls) {
     S.tool = next;
     $('btnMeasure').classList.toggle('active', next === 'measure');
     $('btnProfile').classList.toggle('active', next === 'profile');
+    $('btnDive').classList.toggle('active', next === 'dive');
     stage.classList.toggle('tool-active', !!next);
+    if (next && window.innerWidth < 720) $('ctrl').classList.add('collapsed');     // 手机上选了工具就自动收起面板，腾出画面
     $('toolHint').hidden = !next;
     if (next) $('toolHintText').textContent = TOOL_TEXT[next][0];
   }
@@ -1269,7 +1364,7 @@ function main(THREE, OrbitControls) {
   function cancelTool() {
     S.tool = null; S.toolPts = [];
     clearGroup(toolGroup);
-    $('btnMeasure').classList.remove('active'); $('btnProfile').classList.remove('active');
+    $('btnMeasure').classList.remove('active'); $('btnProfile').classList.remove('active'); $('btnDive').classList.remove('active');
     stage.classList.remove('tool-active');
     $('toolHint').hidden = true; $('measureBox').hidden = true;
   }
@@ -1277,7 +1372,7 @@ function main(THREE, OrbitControls) {
   $('btnProfile').onclick = () => setTool('profile');
   $('btnToolCancel').onclick = () => { cancelTool(); closeProfile(); };
   $('measureClose').onclick = cancelTool;
-  window.addEventListener('keydown', e => { if (e.key === 'Escape') { cancelTool(); } });
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') { if (DIVE.on) exitDive(); else cancelTool(); } });
 
   /** 在 toolGroup 里画点和线。toolGroup 位于 scaledGroup 内，所以 y 直接写 -深度，自动跟随高度夸张 */
   function drawToolGeometry(points, pathPoints) {
@@ -1400,6 +1495,118 @@ function main(THREE, OrbitControls) {
   }
   function closeProfile() { $('profile').hidden = true; }
   $('profileClose').onclick = () => { closeProfile(); if (S.tool === 'profile') { S.toolPts = []; clearGroup(toolGroup); $('toolHintText').textContent = TOOL_TEXT.profile[0]; } };
+
+  /* ==========================================================================
+   * 第 10.5 段：潜水视角（第一人称水下视角）
+   *   - 地形按 1:1 真实比例显示（不夸张），相机放在水面以下；
+   *   - 拖动画面转头；屏幕方向键 / 键盘 WASD 移动，Q E 或右下按钮升降；
+   *   - 水下雾 = 能见度，随深度变暗；头顶能看到水面；周围有漂浮颗粒帮助判断距离和速度。
+   * 注意：海底形状来自估算数据，没有真实的珊瑚、礁石细节，只能帮助理解地形走势和深度感。
+   * ======================================================================== */
+  const diveBg = new THREE.Color();
+  const FOG_SHALLOW = new THREE.Color(0x1f93b8), FOG_DEEP = new THREE.Color(0x052a47);
+
+  // 漂浮颗粒：固定数量的点，始终包围在相机四周（走出盒子的点从另一侧绕回来）
+  const SNOW_N = 600, SNOW_BOX = 36;
+  const snowGeo = new THREE.BufferGeometry();
+  snowGeo.setAttribute('position', new THREE.Float32BufferAttribute(Array.from({ length: SNOW_N * 3 }, () => (Math.random() - 0.5) * SNOW_BOX), 3));
+  const snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({ color: 0xdff6ff, size: 0.045, transparent: true, opacity: 0.55, depthWrite: false }));
+  snow.frustumCulled = false; snow.visible = false; scene.add(snow);
+
+  /** 在点击位置附近找一个适合入水的点（深度 4~25 m；点到陆地或太浅太深时自动挪到最近的合适位置） */
+  function findDiveStart(x, z) {
+    const ok = d => d >= 4 && d <= 25;
+    if (ok(sampleDepth(x, z))) return { x, z };
+    const step = Math.max(S.geo.widthM / (S.grid.nx - 1), 5), hw = S.geo.widthM / 2 - 2, hh = S.geo.heightM / 2 - 2;
+    for (let r = 1; r < 300; r++) {
+      for (let k = 0; k < 8 * r; k++) {
+        const a = k / (8 * r) * Math.PI * 2, px = x + Math.cos(a) * r * step, pz = z + Math.sin(a) * r * step;
+        if (Math.abs(px) < hw && Math.abs(pz) < hh && ok(sampleDepth(px, pz))) return { x: px, z: pz };
+      }
+    }
+    return { x, z };
+  }
+
+  function enterDive(x, z) {
+    if (!S.grid || DIVE.on) return;
+    cancelTool(); closeProfile();
+    const p = findDiveStart(x, z), bottom = sampleDepth(p.x, p.z);
+    DIVE.saved = { camPos: camera.position.clone(), target: controls.target.clone(), near: camera.near, far: camera.far, fov: camera.fov, bg: scene.background };
+    DIVE.on = true; DIVE.keys = {}; DIVE.fast = false; $('dvFast').classList.remove('active');
+    DIVE.pos = new THREE.Vector3(p.x, -clamp(bottom - 1.6, 1.5, 8), p.z);          // 起始深度：离海底约 1.6 m，最深先到 8 m
+    // 面朝“上坡”方向（朝礁盘），这样一进来就能看到地形
+    const gx = sampleDepth(p.x + 8, p.z) - sampleDepth(p.x - 8, p.z), gz = sampleDepth(p.x, p.z + 8) - sampleDepth(p.x, p.z - 8);
+    DIVE.yaw = Math.hypot(gx, gz) > 0.02 ? Math.atan2(-gx, gz) : 0;
+    DIVE.pitch = -0.12;
+    controls.enabled = false;
+    camera.near = 0.12; camera.far = 600; camera.fov = 70; camera.updateProjectionMatrix();
+    scene.background = diveBg; FX.uUnder.value = 1; snow.visible = true;
+    document.body.classList.add('diving'); $('diveHud').hidden = false; $('exag').disabled = true;
+    applyExaggeration(); applyFog(); applyLayerVisibility();
+    updateDive(0);
+  }
+
+  function exitDive() {
+    if (!DIVE.on) return;
+    DIVE.on = false; DIVE.keys = {};
+    const sv = DIVE.saved;
+    camera.near = sv.near; camera.far = sv.far; camera.fov = sv.fov; camera.updateProjectionMatrix();
+    camera.position.copy(sv.camPos); controls.target.copy(sv.target); controls.enabled = true; controls.update();
+    scene.background = sv.bg; scene.fog.color.set(FOG_COLOR); FX.uUnder.value = 0; snow.visible = false;
+    document.body.classList.remove('diving'); $('diveHud').hidden = true; $('exag').disabled = false;
+    applyExaggeration(); applyFog(); applyLayerVisibility();
+  }
+
+  const HEADINGS = ['北', '东北', '东', '东南', '南', '西南', '西', '西北'];
+  /** 每帧调用：按按键移动相机、防止穿过海底或冲出水面、更新雾色和读数 */
+  function updateDive(dt) {
+    const k = DIVE.keys, sp = (DIVE.fast ? 14 : 3) * dt;                           // 平时 3 m/s，加速 14 m/s（潜点有几公里大）
+    const fwd = (k.f ? 1 : 0) - (k.b ? 1 : 0), side = (k.r ? 1 : 0) - (k.l ? 1 : 0), vert = (k.u ? 1 : 0) - (k.d ? 1 : 0);
+    const sy = Math.sin(DIVE.yaw), cy = Math.cos(DIVE.yaw);
+    let nx = DIVE.pos.x + (fwd * sy + side * cy) * sp, nz = DIVE.pos.z + (-fwd * cy + side * sy) * sp;
+    nx = clamp(nx, -S.geo.widthM / 2 + 1, S.geo.widthM / 2 - 1); nz = clamp(nz, -S.geo.heightM / 2 + 1, S.geo.heightM / 2 - 1);
+    if (sampleDepth(nx, nz) > 1.6) { DIVE.pos.x = nx; DIVE.pos.z = nz; }           // 前面太浅（或是陆地）就游不过去
+    const bottom = sampleDepth(DIVE.pos.x, DIVE.pos.z);
+    DIVE.pos.y = clamp(DIVE.pos.y + vert * sp * 0.7, -(bottom - 1.1), -0.5);       // 离海底至少 1.1 m，离水面至少 0.5 m
+    camera.position.copy(DIVE.pos);
+    camera.rotation.set(DIVE.pitch, -DIVE.yaw, 0, 'YXZ');
+    // 水色随深度变暗
+    const depth = -DIVE.pos.y;
+    diveBg.copy(FOG_SHALLOW).lerp(FOG_DEEP, clamp(depth / 40, 0, 1));
+    scene.fog.color.copy(diveBg); FX.uFogCol.value.copy(diveBg);
+    // 漂浮颗粒绕回
+    const a = snowGeo.attributes.position.array, h = SNOW_BOX / 2;
+    for (let i = 0; i < a.length; i += 3) {
+      for (let c = 0; c < 3; c++) {
+        const cam = c === 0 ? DIVE.pos.x : c === 1 ? DIVE.pos.y : DIVE.pos.z;
+        if (a[i + c] - cam > h) a[i + c] -= SNOW_BOX; else if (a[i + c] - cam < -h) a[i + c] += SNOW_BOX;
+      }
+    }
+    snowGeo.attributes.position.needsUpdate = true;
+    // 读数
+    $('dvDepth').textContent = depth.toFixed(1); $('dvBottom').textContent = bottom.toFixed(1);
+    const deg = ((DIVE.yaw * 180 / Math.PI) % 360 + 360) % 360;
+    $('dvHead').textContent = HEADINGS[Math.round(deg / 45) % 8] + ' ' + Math.round(deg) + '°';
+  }
+
+  // 入口：点按钮后再点地形选位置
+  $('btnDive').onclick = () => setTool('dive');
+  $('dvExit').onclick = exitDive;
+  $('dvFast').onclick = () => { DIVE.fast = !DIVE.fast; $('dvFast').classList.toggle('active', DIVE.fast); };
+  // 屏幕方向键：按住移动，松开停止
+  document.querySelectorAll('.pad button').forEach(btn => {
+    const key = btn.dataset.k;
+    const on = e => { e.preventDefault(); DIVE.keys[key] = true; btn.classList.add('down'); try { btn.setPointerCapture(e.pointerId); } catch (_) {} };
+    const off = () => { DIVE.keys[key] = false; btn.classList.remove('down'); };
+    btn.addEventListener('pointerdown', on); btn.addEventListener('pointerup', off);
+    btn.addEventListener('pointercancel', off); btn.addEventListener('lostpointercapture', off);
+    btn.addEventListener('contextmenu', e => e.preventDefault());
+  });
+  // 键盘：W/S/A/D 或方向键移动，E/空格上升，Q/Shift 下潜
+  const KEYMAP = { w: 'f', arrowup: 'f', s: 'b', arrowdown: 'b', a: 'l', arrowleft: 'l', d: 'r', arrowright: 'r', e: 'u', ' ': 'u', q: 'd', shift: 'd' };
+  window.addEventListener('keydown', e => { const m = KEYMAP[e.key.toLowerCase()]; if (DIVE.on && m) { DIVE.keys[m] = true; e.preventDefault(); } });
+  window.addEventListener('keyup',   e => { const m = KEYMAP[e.key.toLowerCase()]; if (m) DIVE.keys[m] = false; });
+  window.addEventListener('blur', () => { DIVE.keys = {}; });
 
   /* ==========================================================================
    * 第 11 段：可选在线图层（实时洋流 + 潮汐）
@@ -1537,13 +1744,24 @@ function main(THREE, OrbitControls) {
   window.addEventListener('offline', refreshOnline);
 
   const clock = new THREE.Clock();
-  renderer.setAnimationLoop(() => { FX.uTime.value = clock.getElapsedTime(); controls.update(); renderer.render(scene, camera); });
+  let lastT = 0;
+  renderer.setAnimationLoop(() => {
+    const t = clock.getElapsedTime(), dt = Math.min(t - lastT, 0.1); lastT = t;
+    FX.uTime.value = t;
+    if (DIVE.on) updateDive(dt); else controls.update();
+    renderer.render(scene, camera);
+  });
+
+  // 控制面板的显示 / 隐藏；手机上默认收起
+  $('panelToggle').onclick = () => $('ctrl').classList.toggle('collapsed');
+  if (window.innerWidth < 720) $('ctrl').classList.add('collapsed');
+  $('spotBar').querySelector('h1').onclick = () => $('spotBar').classList.toggle('open');
 
   buildLegend();
   initSpotList();
 
   // 调试入口：控制台里可以用 window.__sandbox 查看状态
-  window.__sandbox = { S, scene, camera, controls, loadSpot, refreshOnline };
+  window.__sandbox = { S, scene, camera, controls, loadSpot, refreshOnline, enterDive, exitDive, DIVE };
 }
 </script>
 </body>
