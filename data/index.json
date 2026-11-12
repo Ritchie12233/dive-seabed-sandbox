@@ -1,0 +1,20 @@
+{
+  "spots": [
+    {
+      "spotId": "sipadan",
+      "name": "诗巴丹 Sipadan（卫星影像推算）"
+    },
+    {
+      "spotId": "mabul",
+      "name": "马布 Mabul（卫星影像 + GEBCO）"
+    },
+    {
+      "spotId": "demo-wall",
+      "name": "演示：礁盘断崖（合成地形）"
+    },
+    {
+      "spotId": "demo-slope",
+      "name": "演示：缓坡礁群（合成地形）"
+    }
+  ]
+}

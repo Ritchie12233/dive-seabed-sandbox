@@ -1,0 +1,7 @@
+{
+ "_source": "Open-Meteo Marine API hourly ocean_current_velocity / ocean_current_direction, 2022-01-01 to 2026-10-31 (earliest available was 2022-01), aggregated 2026-11-11. dir = direction of the vector-mean flow (deg, toward, 0 = north); net = vector-mean speed m/s; mean = mean hourly speed m/s; max = max hourly speed m/s; n = hours. dry = Apr-Oct, rainy = Nov-Mar. mon = Jan..Dec as dir/net/mean.",
+ "sipadan": {"modelCell":[4.125,118.625], "dry":{"dir":123,"net":0.057,"mean":0.201,"max":0.58,"n":25584}, "rainy":{"dir":186,"net":0.156,"mean":0.222,"max":0.64,"n":16680},
+   "mon":"176/0.17/0.22 199/0.189/0.236 208/0.179/0.232 225/0.096/0.191 215/0.063/0.231 103/0.092/0.213 85/0.112/0.191 79/0.091/0.192 106/0.086/0.193 142/0.102/0.199 165/0.119/0.198 164/0.154/0.22"},
+ "mabul": {"modelCell":[4.208336,118.625], "dry":{"dir":100,"net":0.081,"mean":0.204,"max":0.67,"n":25584}, "rainy":{"dir":188,"net":0.134,"mean":0.199,"max":0.61,"n":16680},
+   "mon":"182/0.144/0.201 200/0.161/0.207 206/0.138/0.197 216/0.064/0.177 167/0.032/0.211 87/0.13/0.224 79/0.182/0.228 76/0.123/0.201 96/0.106/0.201 143/0.093/0.184 173/0.11/0.19 168/0.134/0.201"}
+}

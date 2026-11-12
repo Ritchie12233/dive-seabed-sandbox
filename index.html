@@ -1,0 +1,1549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dive Seabed Sandbox 潜水潜点海底3D沙盘</title>
+<!--
+  ============================================================================
+  Dive Seabed Sandbox —— 潜水潜点海底 3D 沙盘（单文件版）
+  ----------------------------------------------------------------------------
+  启动方式：在本目录执行  python -m http.server 8000  然后打开 http://localhost:8000
+  目录约定（全部相对路径，可整个文件夹拷贝 / U 盘分发 / GitHub Pages 部署）：
+    index.html
+    heightmaps/[spotId].png      高程灰度图（白 = 浅，黑 = 深）
+    data/[spotId].json           每个潜点一份配置
+    data/index.json              （可选）潜点清单，缺失时使用下方 CONFIG.defaultSpots
+    assets/icons/[type].svg      标记图标 entry / anchor / view / warning
+    libs/                        （可选）Three.js 本地副本，存在时优先使用，实现彻底断网可用
+  架构原则：
+    1. 离线优先：地形、标记、区域、季节洋流全部来自本地静态文件。
+    2. 实时洋流 / 潮汐只是可选附加图层：独立异步任务 + 3 秒超时 + 静默失败 + 自动回退。
+  ============================================================================
+-->
+<style>
+  /* ---------- 基础 ---------- */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #020b16; color: #fff;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; font-size: 13px; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; }
+  #stage.tool-active canvas { cursor: crosshair; }
+  [hidden] { display: none !important; }
+
+  /* ---------- 通用半透明深色面板 ---------- */
+  .panel { position: fixed; background: rgba(6, 20, 34, 0.78); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); z-index: 10; }
+
+  /* ---------- 左上角：潜点选择 ---------- */
+  #spotBar { top: 12px; left: 12px; padding: 10px 12px; max-width: 280px; }
+  #spotBar h1 { margin: 0 0 8px; font-size: 13px; font-weight: 600; letter-spacing: .3px; }
+  #spotBar select { width: 100%; padding: 5px 6px; background: #0c2740; color: #fff;
+    border: 1px solid rgba(255,255,255,0.25); border-radius: 5px; font-size: 13px; }
+  #legend { margin-top: 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; color: rgba(255,255,255,.8); font-size: 12px; }
+  #spotSource { margin-top: 8px; font-size: 11px; line-height: 1.45; color: rgba(255,255,255,.55); }
+  #spotSource:empty { display: none; }
+  #legend span { display: flex; align-items: center; gap: 5px; }
+  #legend img, #legend i { width: 14px; height: 14px; border-radius: 50%; display: inline-block; flex: none; }
+
+  /* ---------- 右侧：控制面板 ---------- */
+  #ctrl { top: 12px; right: 12px; width: 236px; padding: 10px 12px; max-height: calc(100vh - 190px); overflow-y: auto; }
+  #ctrl h2 { margin: 10px 0 6px; font-size: 12px; font-weight: 600; color: rgba(255,255,255,.6);
+    border-bottom: 1px solid rgba(255,255,255,.12); padding-bottom: 4px; }
+  #ctrl h2:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
+  .row label { flex: 1; cursor: pointer; }
+  .row output { width: 42px; text-align: right; color: #8fd8ff; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #39b6e8; margin: 2px 0 0; }
+  input[type=checkbox] { accent-color: #39b6e8; width: 15px; height: 15px; }
+  .btns { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  button { background: rgba(255,255,255,.08); color: #fff; border: 1px solid rgba(255,255,255,.22);
+    border-radius: 5px; padding: 6px 4px; font-size: 12px; cursor: pointer; font-family: inherit; }
+  button:hover { background: rgba(255,255,255,.16); }
+  button.active { background: #1f86b8; border-color: #6fd0ff; }
+  button.wide { grid-column: 1 / -1; }
+  .seg { display: flex; gap: 0; }
+  .seg button { border-radius: 0; padding: 3px 9px; }
+  .seg button:first-child { border-radius: 5px 0 0 5px; }
+  .seg button:last-child { border-radius: 0 5px 5px 0; border-left: none; }
+  #rtStatus { margin: 6px 0 0; font-size: 11px; color: rgba(255,255,255,.5); line-height: 1.4; min-height: 15px; }
+
+  /* ---------- 右下角：潮汐面板（联网成功才显示） ---------- */
+  #tide { right: 12px; bottom: 34px; width: 236px; padding: 10px 12px; }
+  #tide h3 { margin: 0 0 6px; font-size: 12px; color: rgba(255,255,255,.6); font-weight: 600; }
+  #tide .big { font-size: 20px; font-weight: 600; color: #8fd8ff; }
+  #tide p { margin: 3px 0; }
+  #tide small { color: rgba(255,255,255,.45); font-size: 10.5px; line-height: 1.35; display: block; margin-top: 4px; }
+
+  /* ---------- 加载进度 / 失败提示 ---------- */
+  #loading { left: 50%; top: 50%; transform: translate(-50%, -50%); width: 320px; padding: 14px 16px; text-align: center; z-index: 30; }
+  #loadText { margin: 0 0 10px; line-height: 1.6; white-space: pre-line; }
+  #loadBarWrap { height: 6px; background: rgba(255,255,255,.12); border-radius: 3px; overflow: hidden; }
+  #loadBar { height: 100%; width: 0%; background: #39b6e8; transition: width .15s; }
+  #loading.error #loadBarWrap { display: none; }
+  #loading.error #loadText { color: #ffd0a8; text-align: left; }
+  #loadClose { margin-top: 10px; padding: 4px 14px; }
+
+  /* ---------- 悬浮卡片（标记 / 区域备注） ---------- */
+  #card { position: fixed; pointer-events: none; z-index: 20; max-width: 260px; padding: 8px 10px; }
+  #card .t { display: flex; align-items: center; gap: 6px; font-weight: 600; margin-bottom: 4px; }
+  #card .t img { width: 16px; height: 16px; }
+  #card .d { color: #8fd8ff; margin-bottom: 3px; }
+  #card .n { color: rgba(255,255,255,.85); line-height: 1.5; }
+
+  /* ---------- 工具提示条 & 测距结果 ---------- */
+  #toolHint { top: 12px; left: 50%; transform: translateX(-50%); padding: 7px 12px; display: flex; gap: 10px; align-items: center; }
+  #toolHint button { padding: 2px 10px; }
+  #measureBox { top: 56px; left: 50%; transform: translateX(-50%); padding: 10px 14px; min-width: 220px; }
+  #measureBox table { border-collapse: collapse; width: 100%; }
+  #measureBox td { padding: 2px 0; }
+  #measureBox td:last-child { text-align: right; color: #8fd8ff; font-variant-numeric: tabular-nums; padding-left: 18px; }
+  .x { position: absolute; top: 4px; right: 6px; background: none; border: none; font-size: 16px; padding: 0 4px; color: rgba(255,255,255,.7); }
+
+  /* ---------- 剖面图窗口 ---------- */
+  #profile { right: 260px; bottom: 34px; width: 440px; max-width: calc(100vw - 280px); padding: 10px 12px 8px; }
+  #profile h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; padding-right: 20px; }
+  #profileCanvas { width: 100%; height: 220px; display: block; }
+
+  #satCredit { position: fixed; left: 12px; bottom: 24px; font-size: 10.5px; color: rgba(255,255,255,.5); z-index: 5; pointer-events: none; text-shadow: 0 1px 2px #000; }
+
+  /* ---------- 底部免责声明 ---------- */
+  #disclaimer { position: fixed; left: 0; right: 0; bottom: 6px; text-align: center; font-size: 11px;
+    color: rgba(255,255,255,.55); z-index: 5; padding: 0 12px; pointer-events: none; text-shadow: 0 1px 2px #000; }
+
+  @media (max-width: 720px) {
+    #ctrl { width: 200px; } #tide { width: 200px; }
+    #profile { right: 12px; left: 12px; width: auto; max-width: none; bottom: 34px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 3D 画布容器 -->
+<div id="stage"></div>
+
+<!-- 左上角：潜点下拉 + 图例 -->
+<div id="spotBar" class="panel">
+  <h1>Dive Seabed Sandbox · 海底3D沙盘</h1>
+  <select id="spotSelect" aria-label="选择潜点"></select>
+  <div id="legend"></div>
+  <div id="spotSource"></div>
+</div>
+
+<!-- 右侧：控制面板 -->
+<div id="ctrl" class="panel">
+  <h2>① 地形控制</h2>
+  <div class="row"><label for="exag">高度夸张</label><output id="exagOut">2.5×</output></div>
+  <input type="range" id="exag" min="0" max="10" step="0.1" value="2.5">
+  <div class="row"><label for="fog">水下雾浓度</label><output id="fogOut">25</output></div>
+  <input type="range" id="fog" min="0" max="100" step="1" value="25">
+  <div class="row"><label for="chkReal">写实模式</label><input type="checkbox" id="chkReal" checked></div>
+  <!-- 卫星影像贴图：本地 textures/[spotId].jpg 或在线高清图可用时才出现 -->
+  <div class="row" id="rowSat" hidden><label for="chkSat">卫星影像贴图</label><input type="checkbox" id="chkSat" checked></div>
+  <div class="row"><label for="chkContour">等深线</label><input type="checkbox" id="chkContour" checked></div>
+  <div class="row"><label for="chkWater">海水表层</label><input type="checkbox" id="chkWater" checked></div>
+
+  <h2>② 图层开关</h2>
+  <div class="row"><label for="chkMarkers">标记点</label><input type="checkbox" id="chkMarkers" checked></div>
+  <div class="row"><label for="chkZones">安全 / 危险区域</label><input type="checkbox" id="chkZones" checked></div>
+  <div class="row"><label for="chkSeason">季节洋流</label>
+    <span class="seg"><button id="btnDry" class="active">旱季</button><button id="btnRainy">雨季</button></span>
+    <input type="checkbox" id="chkSeason" checked></div>
+  <!-- 实时洋流开关：默认隐藏，接口成功后才出现；失败时自动隐藏 -->
+  <div class="row" id="rowRealtime" hidden><label for="chkRealtime">实时洋流</label><input type="checkbox" id="chkRealtime" checked></div>
+
+  <h2>③ 工具</h2>
+  <div class="btns">
+    <button id="btnMeasure">测距</button>
+    <button id="btnProfile">剖面</button>
+    <button id="btnReset">重置视角</button>
+    <button id="btnShot">截图</button>
+    <button id="btnRefresh" class="wide">拉取 / 刷新实时洋流预报</button>
+  </div>
+  <p id="rtStatus"></p>
+</div>
+
+<!-- 右下角：潮汐面板（默认隐藏） -->
+<div id="tide" class="panel" hidden>
+  <h3>潮汐（在线估算）</h3>
+  <p><span class="big" id="tideH">--</span> <span id="tideTrend"></span></p>
+  <p id="tideNext"></p>
+  <small>海面高度相对平均海平面，来自全球模型，非验潮站数据，不可用于航行与下潜决策。</small>
+</div>
+
+<!-- 加载进度 / 失败提示 -->
+<div id="loading" class="panel">
+  <p id="loadText">正在启动…</p>
+  <div id="loadBarWrap"><div id="loadBar"></div></div>
+  <button id="loadClose" hidden>知道了</button>
+</div>
+
+<!-- 悬浮卡片 -->
+<div id="card" class="panel" hidden></div>
+
+<!-- 工具提示条 -->
+<div id="toolHint" class="panel" hidden><span id="toolHintText"></span><button id="btnToolCancel">取消 (Esc)</button></div>
+
+<!-- 测距结果 -->
+<div id="measureBox" class="panel" hidden>
+  <button class="x" id="measureClose" title="关闭">×</button>
+  <table>
+    <tr><td>水平距离</td><td id="mDist">-</td></tr>
+    <tr><td>深度差</td><td id="mDepth">-</td></tr>
+    <tr><td>坡度</td><td id="mSlope">-</td></tr>
+  </table>
+</div>
+
+<!-- 剖面图 -->
+<div id="profile" class="panel" hidden>
+  <button class="x" id="profileClose" title="关闭">×</button>
+  <h3 id="profileTitle">地形剖面</h3>
+  <canvas id="profileCanvas"></canvas>
+</div>
+
+<!-- 卫星影像署名（贴图显示时出现） -->
+<div id="satCredit" hidden></div>
+
+<!-- 底部安全免责声明 -->
+<div id="disclaimer">本沙盘仅为潜点规划参考，不替代潜导、专业海图、潜水安全评估，不可作为航行与下潜安全依据。</div>
+
+<script>
+'use strict';
+
+/* ============================================================================
+ * 第 0 段：全局配置（改路径、改默认值、换 API 都在这里）
+ * ========================================================================== */
+const CONFIG = {
+  // 资源路径约定（全部相对路径）
+  paths: {
+    heightmap: id => `heightmaps/${id}.png`,
+    data:      id => `data/${id}.json`,
+    index:     'data/index.json',          // 可选的潜点清单
+    texture:   id => `textures/${id}.jpg`, // 可选的本地卫星影像贴图（范围必须与 bounds 一致，上北下南）
+    icons:     'assets/icons/',            // [type].svg
+  },
+  // data/index.json 不存在时使用的内置潜点清单 —— 新增潜点时在这里或 index.json 里加一行
+  defaultSpots: [
+    { spotId: 'sipadan',    name: '诗巴丹 Sipadan（卫星影像推算）' },
+    { spotId: 'mabul',      name: '马布 Mabul（卫星影像 + GEBCO）' },
+    { spotId: 'demo-wall',  name: '演示：礁盘断崖（合成地形）' },
+    { spotId: 'demo-slope', name: '演示：缓坡礁群（合成地形）' },
+  ],
+  terrain: {
+    maxImage: 1024,      // 高度图最大边长，超过会自动缩小
+    maxGrid: 257,        // 地形网格单边最大顶点数（257×257 ≈ 13 万三角面，普通笔记本流畅）
+    defaultExag: 2.5,    // 默认高度夸张倍数
+  },
+  // JSON 中缺少可选字段 bounds / depthRange 时的兜底
+  fallbackDepthRange: { min: 0, max: 40 },
+  // Three.js 来源：先探测本地 libs/（彻底断网可用），没有则走 CDN
+  three: {
+    local: { three: './libs/three.module.js', addons: './libs/addons/' },
+    cdn:   { three: 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js',
+             addons: 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/' },
+  },
+};
+
+/* ============================================================================
+ * ★★★ 在线接口配置（预留替换位）★★★
+ * 默认使用 Open-Meteo Marine API（免费、无需 Key）。要换成自己的接口：
+ *   1. 改 currentsUrl / tideUrl 返回的地址；
+ *   2. 改 parseCurrents / parseTide，把接口响应转换成下面约定的结构即可，其余代码不用动。
+ * 把 enabled 设为 false 可彻底关闭所有联网请求（纯离线分发时可用）。
+ * 注意：全球模型分辨率约数公里，一个潜点范围内各采样点的值可能相同，仅作趋势参考。
+ * ========================================================================== */
+const API_CONFIG = {
+  enabled: true,
+  timeoutMs: 3000,     // 硬性要求：3 秒超时
+  sampleGrid: 3,       // 实时洋流在潜点范围内取 N×N 个采样点
+
+  // —— 实时洋流接口地址：points = [{lat, lng}, ...]
+  currentsUrl(points) {
+    const lat = points.map(p => p.lat.toFixed(4)).join(',');
+    const lng = points.map(p => p.lng.toFixed(4)).join(',');
+    return `https://marine-api.open-meteo.com/v1/marine?latitude=${lat}&longitude=${lng}` +
+           `&current=ocean_current_velocity,ocean_current_direction&timeformat=unixtime&timezone=GMT`;
+  },
+  // —— 把接口响应转成 [{lat, lng, dir(流向°，正北为0顺时针), speed(m/s)}]
+  parseCurrents(json, points) {
+    const list = Array.isArray(json) ? json : [json];
+    const out = [];
+    list.forEach((item, i) => {
+      const c = item && item.current;
+      if (!c || c.ocean_current_velocity == null || c.ocean_current_direction == null) return;
+      let speed = Number(c.ocean_current_velocity);
+      const unit = (item.current_units && item.current_units.ocean_current_velocity) || 'km/h';
+      if (unit === 'km/h') speed /= 3.6;            // 统一成 m/s
+      else if (unit === 'kn' || unit === 'knots') speed *= 0.5144;
+      else if (unit === 'mp/h' || unit === 'mph') speed *= 0.44704;
+      out.push({ lat: points[i].lat, lng: points[i].lng, dir: Number(c.ocean_current_direction), speed });
+    });
+    return out;
+  },
+
+  // —— 潮汐接口地址
+  tideUrl(lat, lng) {
+    return `https://marine-api.open-meteo.com/v1/marine?latitude=${lat.toFixed(4)}&longitude=${lng.toFixed(4)}` +
+           `&hourly=sea_level_height_msl&forecast_days=3&timeformat=unixtime&timezone=GMT`;
+  },
+  // —— 把接口响应转成 { times: [毫秒时间戳...], heights: [米...] }（按时间升序的逐时序列）
+  parseTide(json) {
+    const h = json && json.hourly;
+    if (!h || !Array.isArray(h.time) || !Array.isArray(h.sea_level_height_msl)) return null;
+    return { times: h.time.map(t => t * 1000), heights: h.sea_level_height_msl };
+  },
+};
+
+/* ============================================================================
+ * ★ 卫星影像贴图（可选在线图层，预留替换位）
+ * 加载顺序：本地 textures/[spotId].jpg → 浏览器缓存里上次下载的高清图 → 在线下载高清图。
+ * 在线部分与实时洋流一样：独立异步、超时即放弃、失败不提示，继续用本地图或程序化纹理。
+ * 默认图源：Sentinel-2 cloudless（EOX），10 m 分辨率。许可为 CC BY-NC-SA 4.0（非商用、需署名）。
+ * 换图源只需改 url()：任何支持按经纬度范围出图、并允许跨域的 WMS 都可以。
+ * ========================================================================== */
+const SATELLITE_CONFIG = {
+  enabled: true,
+  timeoutMs: 8000,           // 图片比 JSON 大，给 8 秒；超时静默放弃
+  maxSize: 1536,             // 请求图片的长边像素
+  url(b, w, h) {
+    return 'https://tiles.maps.eox.at/wms?service=WMS&version=1.1.1&request=GetMap&layers=s2cloudless-2025&styles=' +
+           `&srs=EPSG:4326&bbox=${b.west},${b.south},${b.east},${b.north}&width=${w}&height=${h}&format=image/jpeg`;
+  },
+  credit: '卫星影像：Sentinel-2 cloudless 2025 · EOX IT Services（含经处理的 Copernicus Sentinel 数据）· CC BY-NC-SA 4.0',
+};
+
+/* 标记 / 区域的显示定义 */
+const MARKER_TYPES = {
+  entry:   { label: '入水点', color: 0x2ee59d },
+  anchor:  { label: '锚点',   color: 0x5aa9ff },
+  view:    { label: '观景点', color: 0xffd84d },
+  warning: { label: '危险点', color: 0xff5a4d },
+};
+const ZONE_TYPES = {
+  good:    { label: '适合下潜', color: 0x2ecc71 },
+  caution: { label: '流大谨慎', color: 0xf1c40f },
+  danger:  { label: '危险区域', color: 0xe74c3c },
+};
+
+/* ============================================================================
+ * 第 1 段：小工具函数
+ * ========================================================================== */
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
+const hex = c => '#' + c.toString(16).padStart(6, '0');
+
+/** 带超时的 fetch：超时或失败都会 reject，由调用方决定是否静默 */
+async function fetchJSON(url, timeoutMs) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctl.signal, cache: 'no-cache' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  } finally { clearTimeout(timer); }
+}
+
+/** 取一个“好看”的刻度间隔：1 / 2 / 5 × 10^n */
+function niceStep(raw) {
+  if (!(raw > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const f = raw / p;
+  return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p;
+}
+
+/** 射线法判断点是否在多边形内（poly = [[x,z],...]） */
+function pointInPolygon(x, z, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], zi = poly[i][1], xj = poly[j][0], zj = poly[j][1];
+    if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/* ---------- 加载进度 UI ---------- */
+function showLoading(text, pct) {
+  $('loading').hidden = false; $('loading').classList.remove('error'); $('loadClose').hidden = true;
+  $('loadText').textContent = text; $('loadBar').style.width = pct + '%';
+}
+function hideLoading() { $('loading').hidden = true; }
+/** 加载失败：只显示友好文字，不抛异常、不卡住页面，用户仍可切换其它潜点 */
+function failLoading(text) {
+  const tip = location.protocol === 'file:'
+    ? '\n\n提示：当前是直接双击打开（file://），浏览器会拦截本地文件读取。请在本目录执行\npython -m http.server 8000\n再访问 http://localhost:8000'
+    : '';
+  $('loading').hidden = false; $('loading').classList.add('error'); $('loadClose').hidden = false;
+  $('loadText').textContent = text + tip;
+}
+$('loadClose').onclick = hideLoading;
+
+/* ============================================================================
+ * 第 2 段：启动器 —— 先决定 Three.js 从哪里加载，再进入主程序
+ * 本地 libs/ 存在 → 用本地（真正断网可用）；否则 → CDN。
+ * ========================================================================== */
+(async function boot() {
+  showLoading('正在加载 3D 引擎…', 3);
+  let src = CONFIG.three.cdn;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 1500);
+    const r = await fetch(CONFIG.three.local.three, { method: 'HEAD', signal: ctl.signal });
+    clearTimeout(timer);
+    if (r.ok) src = CONFIG.three.local;
+  } catch (e) { /* 没有本地副本，走 CDN */ }
+
+  // 动态写入 importmap（必须在任何模块 import 之前）
+  const map = document.createElement('script');
+  map.type = 'importmap';
+  map.textContent = JSON.stringify({ imports: { 'three': src.three, 'three/addons/': src.addons } });
+  document.head.appendChild(map);
+
+  try {
+    const THREE = await import('three');
+    const { OrbitControls } = await import('three/addons/controls/OrbitControls.js');
+    main(THREE, OrbitControls);
+  } catch (e) {
+    console.warn('[sandbox] Three.js 加载失败', e);
+    failLoading('3D 引擎（Three.js）加载失败。\n当前没有网络，且未找到本地副本 libs/three.module.js。\n把 Three.js 放进 libs/ 目录后即可完全断网使用。');
+  }
+})();
+
+/* ============================================================================
+ * 第 3 段：主程序
+ * ========================================================================== */
+function main(THREE, OrbitControls) {
+
+  /* ---------- 3.1 运行状态 ---------- */
+  const S = {
+    spotId: null, cfg: null,
+    geo: null,          // 地理范围与米制尺寸 { west,east,south,north,widthM,heightM,span,cLat,cLng }
+    grid: null,         // 深度网格 { nx, nz, depth:Float32Array, min, max }
+    exag: CONFIG.terrain.defaultExag,
+    season: 'dry',
+    tool: null,         // null | 'measure' | 'profile'
+    toolPts: [],
+    loadToken: 0,       // 切换潜点时自增，用于丢弃过期的异步结果
+  };
+
+  /* ---------- 3.2 渲染器 / 场景 / 相机 / 控制器 ---------- */
+  const stage = $('stage');
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+  } catch (e) {
+    failLoading('当前浏览器无法创建 WebGL 画布，请更换浏览器或开启硬件加速。');
+    return;
+  }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;   // 软阴影
+  renderer.shadowMap.autoUpdate = false;              // 阴影只在地形变化时重算，省性能
+  stage.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const FOG_COLOR = 0x0a3554;
+  scene.fog = new THREE.FogExp2(FOG_COLOR, 0.0003);   // 水下体积雾（指数雾），浓度由滑块控制
+  scene.background = makeGradientTexture();           // 深海暗蓝渐变背景
+
+  /** 用 Canvas 画一张竖向渐变图作为背景（这样截图里也带背景） */
+  function makeGradientTexture() {
+    const c = document.createElement('canvas'); c.width = 4; c.height = 256;
+    const g = c.getContext('2d');
+    const grad = g.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0, '#0d3f66'); grad.addColorStop(0.55, '#06243f'); grad.addColorStop(1, '#010a14');
+    g.fillStyle = grad; g.fillRect(0, 0, 4, 256);
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  }
+
+  const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 50000);
+  camera.position.set(300, 1400, 1700);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; controls.dampingFactor = 0.08;
+  controls.minPolarAngle = 0.05;
+  controls.maxPolarAngle = Math.PI / 2 - 0.06;        // 限制俯仰：相机永远在目标点上方，翻不到地形底部
+  // 默认鼠标映射：左键旋转、滚轮缩放、右键平移
+
+  /* ---------- 3.3 灯光：主定向光 + 补光 + 柔和环境光 ---------- */
+  const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+  sun.castShadow = true;
+  const shadowSize = (navigator.hardwareConcurrency || 4) >= 8 ? 2048 : 1024;   // 按机器性能选阴影分辨率
+  sun.shadow.mapSize.set(shadowSize, shadowSize);
+  scene.add(sun, sun.target);
+  const fill = new THREE.DirectionalLight(0x7fc4ff, 0.55);
+  scene.add(fill);
+  scene.add(new THREE.HemisphereLight(0xbfe6ff, 0x0a2238, 0.9));
+
+  /* ---------- 3.4 图层容器 ----------
+   * scaledGroup：里面所有物体的 y 都按“真实深度（米）的负值”存储，
+   * 高度夸张只需要改这个组的 scale.y，不用重建任何几何体。
+   * 标记与箭头不放进来（否则会被压扁 / 拉长），它们在夸张系数变化时单独更新位置。 */
+  const scaledGroup  = new THREE.Group();
+  const contourGroup = new THREE.Group();
+  const zoneGroup    = new THREE.Group();
+  const toolGroup    = new THREE.Group();
+  scaledGroup.add(contourGroup, zoneGroup, toolGroup);
+  const markerGroup   = new THREE.Group();
+  const seasonGroup   = new THREE.Group();
+  const realtimeGroup = new THREE.Group();
+  scene.add(scaledGroup, markerGroup, seasonGroup, realtimeGroup);
+  let terrainMesh = null, waterMesh = null;
+
+  /** 清空一个组并释放 GPU 资源 */
+  function clearGroup(g) {
+    while (g.children.length) {
+      const o = g.children.pop();
+      o.traverse(n => {
+        if (n.geometry) n.geometry.dispose();
+        if (n.material) (Array.isArray(n.material) ? n.material : [n.material]).forEach(m => m.dispose());
+      });
+    }
+  }
+
+  /* ==========================================================================
+   * 第 4 段：坐标换算
+   * 世界坐标单位 = 米。+X = 东，-Z = 北，Y 向上，海面在 y = 0。
+   * ======================================================================== */
+
+  /** 从 JSON 计算地理范围。bounds 是可选扩展字段；没有就用所有点位的外包矩形再外扩 15% */
+  function computeGeo(cfg) {
+    let b = cfg.bounds;
+    if (!b || [b.west, b.east, b.south, b.north].some(v => typeof v !== 'number')) {
+      const lngs = [], lats = [];
+      (cfg.markers || []).forEach(m => { lngs.push(m.lng); lats.push(m.lat); });
+      (cfg.zones || []).forEach(z => (z.points || []).forEach(p => { lngs.push(p[0]); lats.push(p[1]); }));
+      Object.values(cfg.seasonCurrents || {}).forEach(a => (a || []).forEach(c => { lngs.push(c.lng); lats.push(c.lat); }));
+      if (lngs.length) {
+        let w = Math.min(...lngs), e = Math.max(...lngs), s = Math.min(...lats), n = Math.max(...lats);
+        const px = Math.max((e - w) * 0.15, 0.002), py = Math.max((n - s) * 0.15, 0.002);
+        b = { west: w - px, east: e + px, south: s - py, north: n + py };
+      } else {
+        b = { west: 0, east: 0.02, south: 0, north: 0.02 };   // 完全没有坐标：给一个约 2km 的占位范围
+      }
+    }
+    const cLat = (b.south + b.north) / 2, cLng = (b.west + b.east) / 2;
+    const widthM  = (b.east - b.west) * 111320 * Math.cos(cLat * Math.PI / 180);   // 经度差 → 米
+    const heightM = (b.north - b.south) * 110540;                                   // 纬度差 → 米
+    return { ...b, cLat, cLng, widthM, heightM, span: Math.max(widthM, heightM) };
+  }
+
+  /** 经纬度 → 世界坐标 (x, z) */
+  function lngLatToXZ(lng, lat) {
+    const g = S.geo;
+    return {
+      x: ((lng - g.west) / (g.east - g.west) - 0.5) * g.widthM,
+      z: (0.5 - (lat - g.south) / (g.north - g.south)) * g.heightM,
+    };
+  }
+
+  /** 在深度网格上双线性插值，返回 (x, z) 处的真实深度（米，向下为正） */
+  function sampleDepth(x, z) {
+    const { nx, nz, depth } = S.grid, g = S.geo;
+    const u = clamp((x / g.widthM + 0.5) * (nx - 1), 0, nx - 1);
+    const v = clamp((z / g.heightM + 0.5) * (nz - 1), 0, nz - 1);
+    const i0 = Math.min(Math.floor(u), nx - 2), j0 = Math.min(Math.floor(v), nz - 2);
+    const fu = u - i0, fv = v - j0;
+    const a = depth[j0 * nx + i0],       b = depth[j0 * nx + i0 + 1];
+    const c = depth[(j0 + 1) * nx + i0], d = depth[(j0 + 1) * nx + i0 + 1];
+    return (a * (1 - fu) + b * fu) * (1 - fv) + (c * (1 - fu) + d * fu) * fv;
+  }
+
+  /* ==========================================================================
+   * 第 5 段：地形系统
+   * ======================================================================== */
+
+  /** 下载高度图并回报进度（XHR 才能拿到下载进度） */
+  function loadImageWithProgress(url, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', url); xhr.responseType = 'blob'; xhr.timeout = 20000;
+      xhr.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+      xhr.onerror = xhr.ontimeout = () => reject(new Error('network'));
+      xhr.onload = () => {
+        if (xhr.status !== 200 && xhr.status !== 0) return reject(new Error('HTTP ' + xhr.status));
+        const blobUrl = URL.createObjectURL(xhr.response);
+        const img = new Image();
+        img.onload = () => { URL.revokeObjectURL(blobUrl); resolve(img); };
+        img.onerror = () => { URL.revokeObjectURL(blobUrl); reject(new Error('decode')); };
+        img.src = blobUrl;
+      };
+      xhr.send();
+    });
+  }
+
+  /**
+   * 【高度图解析】灰度图 → 深度网格
+   * 约定：白色(255) = 最浅 = depthRange.min，黑色(0) = 最深 = depthRange.max。
+   *       depthRange.min 可以是负数，表示露出水面的岛礁（海拔为正）。
+   * 步骤：1) 把图片画到一张小 canvas 上，同时完成缩放（图片再大也只取 ≤257 的网格，
+   *          相当于自动降采样，原图上限 1024）；
+   *       2) 读出像素，按亮度线性映射成深度（米）。
+   */
+  function parseHeightmap(img, range) {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const k = Math.min(1, CONFIG.terrain.maxImage / Math.max(w, h));     // 超过 1024 先等比缩小
+    const sw = Math.max(2, Math.round(w * k)), sh = Math.max(2, Math.round(h * k));
+    const G = CONFIG.terrain.maxGrid;
+    let nx, nz;
+    if (sw >= sh) { nx = Math.min(G, sw); nz = Math.max(2, Math.round(nx * sh / sw)); }
+    else          { nz = Math.min(G, sh); nx = Math.max(2, Math.round(nz * sw / sh)); }
+
+    const cv = document.createElement('canvas'); cv.width = nx; cv.height = nz;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, nx, nz);
+    const px = ctx.getImageData(0, 0, nx, nz).data;
+
+    const depth = new Float32Array(nx * nz);
+    let min = Infinity, max = -Infinity;
+    for (let i = 0; i < nx * nz; i++) {
+      const lum = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];   // 亮度 0~255
+      const d = range.max - (lum / 255) * (range.max - range.min);
+      depth[i] = d; if (d < min) min = d; if (d > max) max = d;
+    }
+    return { nx, nz, depth, min, max };
+  }
+
+  /** 深度 → 颜色：水面以上沙色，浅处浅青，深处深蓝 */
+  const STOPS = [
+    [0.00, new THREE.Color('#aef0e2')], [0.22, new THREE.Color('#57c8d2')],
+    [0.55, new THREE.Color('#1d74b4')], [1.00, new THREE.Color('#0a2458')],
+  ];
+  const LAND = new THREE.Color('#d9c89c');
+  const _col = new THREE.Color();
+  function depthColor(d, maxDepth) {
+    if (d < 0) return _col.copy(LAND);
+    const t = clamp(d / Math.max(maxDepth, 1), 0, 1);
+    for (let i = 1; i < STOPS.length; i++) {
+      if (t <= STOPS[i][0]) {
+        const a = STOPS[i - 1], b = STOPS[i];
+        return _col.copy(a[1]).lerp(b[1], (t - a[0]) / (b[0] - a[0]));
+      }
+    }
+    return _col.copy(STOPS[STOPS.length - 1][1]);
+  }
+
+  /* ------------------------------------------------------------------------
+   * 写实模式（全部程序化生成，不依赖任何外部图片，断网可用）
+   *   - 海底：沙地 / 礁石斑块 / 深处泥沙的颜色 + 细颗粒凹凸
+   *   - 水体吸收：越深红光衰减越多，颜色自然由青绿过渡到深蓝
+   *   - 焦散：浅水处随时间流动的光网
+   *   - 卫星影像：有贴图时直接铺在地形上（真实的礁盘颜色）
+   * 这些只改变“看起来的样子”，不会增加地形数据本身的精度。
+   * ---------------------------------------------------------------------- */
+
+  /** 生成一张可无缝平铺的噪声图（RGB 三个通道是三份互相独立的分形噪声） */
+  function makeNoiseTexture() {
+    const N = 256, data = new Uint8Array(N * N * 4);
+    let seed = 20261112;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;     // 固定种子：每次打开纹理都一样
+    const smooth = t => t * t * (3 - 2 * t);
+    for (let ch = 0; ch < 3; ch++) {
+      // 周期 4/8/16/32/64 都能整除 256，所以首尾相接没有接缝
+      const layers = [[4, .42], [8, .26], [16, .16], [32, .10], [64, .06]].map(([p, a]) => ({ p, a, g: Float32Array.from({ length: p * p }, rnd) }));
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        let v = 0;
+        for (const { p, a, g } of layers) {
+          const fx = x / N * p, fy = y / N * p, x0 = Math.floor(fx), y0 = Math.floor(fy);
+          const tx = smooth(fx - x0), ty = smooth(fy - y0), x1 = (x0 + 1) % p, y1 = (y0 + 1) % p;
+          v += a * ((g[y0 * p + x0] * (1 - tx) + g[y0 * p + x1] * tx) * (1 - ty) + (g[y1 * p + x0] * (1 - tx) + g[y1 * p + x1] * tx) * ty);
+        }
+        data[(y * N + x) * 4 + ch] = clamp((v - 0.5) * 1.9 + 0.5, 0, 1) * 255;      // 拉开一点对比度
+      }
+    }
+    for (let i = 3; i < data.length; i += 4) data[i] = 255;
+    const t = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true;
+    t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    t.needsUpdate = true;
+    return t;
+  }
+  const noiseTex = makeNoiseTexture();
+  const blankTex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat); blankTex.needsUpdate = true;
+
+  // 地形与水面共用的一组着色器参数
+  const FX = {
+    uTime:   { value: 0 },
+    uReal:   { value: 1 },                          // 1 = 写实模式
+    uNoise:  { value: noiseTex },
+    uSat:    { value: blankTex },                   // 卫星影像
+    uSatMix: { value: 0 },                          // 0 = 不用卫星图，1 = 用
+    uSize:   { value: new THREE.Vector2(1, 1) },    // 地形东西 / 南北长度（米）
+    uSunDir: { value: new THREE.Vector3(-0.45, 0.82, -0.29).normalize() },
+  };
+
+  /** 给标准 PBR 材质注入写实着色（只在 uReal / uSatMix 打开时生效，关闭时与原来完全一样） */
+  function patchTerrainMaterial(mat) {
+    mat.onBeforeCompile = shader => {
+      Object.assign(shader.uniforms, FX);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vWPos;\nvarying float vDepthM;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvDepthM = -position.y;');   // position.y 是未夸张的真实深度
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+          varying vec3 vWPos; varying float vDepthM;
+          uniform float uTime, uReal, uSatMix; uniform sampler2D uNoise, uSat; uniform vec2 uSize;`)
+        .replace('#include <color_fragment>', `#include <color_fragment>
+          {
+            vec2 p = vWPos.xz;
+            float d = vDepthM, wd = max(vDepthM, 0.0);
+            // 三层噪声用不同的旋转角和互不成倍数的尺度采样，避免平铺时出现规则的格子
+            vec2 pr = mat2(0.80, -0.60, 0.60, 0.80) * p, pq = mat2(0.28, 0.96, -0.96, 0.28) * p;
+            float fp = max(fwidth(p.x), fwidth(p.y));            // 一个屏幕像素覆盖多少米
+            float fine = 1.0 - smoothstep(1.0, 6.0, fp);         // 离远了细节小于一个像素，就让它淡出，避免闪烁和摩尔纹
+            vec3 nA = texture2D(uNoise, p / 1710.0).rgb;         // 大斑块（一两百米）
+            vec3 nB = texture2D(uNoise, pr / 293.0 + 0.37).rgb;  // 中等斑块（几十米）
+            vec3 nC = mix(vec3(0.5), texture2D(uNoise, pq / 7.3 + 0.11).rgb, fine);   // 细颗粒（几米）
+            vec3 col = diffuseColor.rgb;
+            if (uReal > 0.5) {
+              // ① 底质颜色：浅处沙地夹礁石斑块，深处过渡到灰色泥沙
+              vec3 sand = vec3(0.86, 0.80, 0.66), reef = vec3(0.40, 0.34, 0.24), mud = vec3(0.46, 0.48, 0.47);
+              float patchy = smoothstep(0.48, 0.64, nA.r * 0.55 + nB.g * 0.45);
+              float reefZone = 1.0 - smoothstep(14.0, 30.0, d);
+              col = mix(sand, reef, patchy * reefZone * 0.85);
+              col = mix(col, mud, smoothstep(22.0, 40.0, d) * 0.7);
+              col *= 0.80 + 0.40 * nC.b;
+              // ② 水面以上：沙滩 → 植被
+              if (d < 0.0) col = mix(vec3(0.90, 0.86, 0.72), vec3(0.13, 0.30, 0.11) * (0.7 + 0.6 * nC.g), smoothstep(0.5, 1.4, -d + nB.r * 0.5));
+              // ③ 水体吸收：红光衰减最快，蓝光最慢；再叠一点水体自身的散射蓝
+              col = col * exp(-wd * vec3(0.150, 0.042, 0.026)) + vec3(0.010, 0.085, 0.170) * (1.0 - exp(-wd * 0.07));
+            }
+            // ④ 卫星影像：有图时以真实影像为主（深水处影像近黑，保留一点底色避免死黑）
+            if (uSatMix > 0.0) {
+              vec3 s = texture2D(uSat, vec2(p.x / uSize.x + 0.5, 0.5 - p.y / uSize.y)).rgb;
+              s = s * 1.55 * (0.90 + 0.20 * nC.b) + col * 0.10;
+              col = mix(col, s, uSatMix);
+            }
+            // ⑤ 焦散光网：只在浅水明显，随深度很快消失
+            if (uReal > 0.5 && d > 0.0) {
+              float c1 = texture2D(uNoise, pr / 23.0 + vec2(uTime * 0.021, uTime * 0.013)).r;
+              float c2 = texture2D(uNoise, pq / 17.0 - vec2(uTime * 0.017, -uTime * 0.019)).g;
+              col += col * pow(1.0 - abs(c1 - c2), 14.0) * 1.3 * exp(-wd * 0.10) * (1.0 - smoothstep(0.6, 3.0, fp));
+            }
+            diffuseColor.rgb = col;
+          }`)
+        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+          if (uReal > 0.5) {   // 细颗粒凹凸：让沙地 / 礁石表面有受光起伏
+            float fpn = max(fwidth(vWPos.x), fwidth(vWPos.z));
+            vec3 g = texture2D(uNoise, mat2(0.28, 0.96, -0.96, 0.28) * vWPos.xz / 11.3).rgb - 0.5;
+            normal = normalize(normal + (viewMatrix * vec4(g.x, 0.0, g.y, 0.0)).xyz * 0.45 * (1.0 - smoothstep(1.0, 6.0, fpn)));
+          }`);
+    };
+  }
+
+  /** 写实水面：菲涅尔（斜看更不透明）+ 流动细波 + 太阳高光 */
+  function makeWaterMaterial() {
+    return new THREE.ShaderMaterial({
+      uniforms: FX, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+      fragmentShader: `
+        varying vec3 vW; uniform float uTime; uniform sampler2D uNoise; uniform vec3 uSunDir;
+        void main(){
+          vec2 p = vW.xz;
+          float fp = max(fwidth(p.x), fwidth(p.y));
+          float k = 1.0 - smoothstep(0.8, 5.0, fp);            // 远处波纹小于一个像素：淡出成平静水面，避免闪点
+          vec3 a = texture2D(uNoise, mat2(0.80, -0.60, 0.60, 0.80) * p / 61.0 + vec2(uTime * 0.012, uTime * 0.007)).rgb;
+          vec3 b = texture2D(uNoise, mat2(0.28, 0.96, -0.96, 0.28) * p / 19.0 - vec2(uTime * 0.016, -uTime * 0.011)).rgb;
+          vec3 N = normalize(vec3((a.r + b.g - 1.0) * 0.55 * k, 1.0, (a.g + b.b - 1.0) * 0.55 * k));
+          vec3 V = normalize(cameraPosition - vW);
+          if (V.y < 0.0) { V.y = -V.y; }                       // 相机在水下时从下往上看
+          float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+          float spec = pow(max(dot(reflect(-uSunDir, N), V), 0.0), 90.0) * k * 0.35;
+          vec3 col = mix(vec3(0.05, 0.36, 0.52), vec3(0.55, 0.76, 0.90), fres) + vec3(1.0, 0.97, 0.90) * spec * 0.9;
+          gl_FragColor = vec4(col, clamp(0.07 + 0.50 * fres + spec, 0.0, 0.92));
+          #include <colorspace_fragment>
+        }`,
+    });
+  }
+  const waterMatReal  = makeWaterMaterial();
+  const waterMatPlain = new THREE.MeshBasicMaterial({ color: 0x3aa7d6, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide });
+
+  /** 用 PlaneGeometry 生成地形网格 + 海水表层 */
+  function buildTerrain() {
+    const { nx, nz, depth, max } = S.grid, g = S.geo;
+    const geo = new THREE.PlaneGeometry(g.widthM, g.heightM, nx - 1, nz - 1);
+    geo.rotateX(-Math.PI / 2);                       // 平面躺平：图片上边 = 北 = -Z
+    const pos = geo.attributes.position;
+    const colors = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      pos.setY(i, -depth[i]);                        // y = -深度（真实米数，夸张交给 scale.y）
+      const c = depthColor(depth[i], max);
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();                      // 自动计算法线
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92, metalness: 0.0 });   // PBR 材质
+    patchTerrainMaterial(mat);
+    FX.uSize.value.set(g.widthM, g.heightM);
+    terrainMesh = new THREE.Mesh(geo, mat);
+    terrainMesh.castShadow = true; terrainMesh.receiveShadow = true;
+    scaledGroup.add(terrainMesh);
+
+    // 半透明海水表层（y = 0）
+    const wGeo = new THREE.PlaneGeometry(g.widthM, g.heightM); wGeo.rotateX(-Math.PI / 2);
+    waterMesh = new THREE.Mesh(wGeo, $('chkReal').checked ? waterMatReal : waterMatPlain);
+    waterMesh.renderOrder = 5;
+    waterMesh.visible = $('chkWater').checked;
+    scene.add(waterMesh);
+  }
+
+  /**
+   * 【等深线】Marching Squares：逐网格单元找出等值线穿过的边，连成线段。
+   * 间隔自动适配：把总深度范围分成约 12 档，再取整到 1/2/5×10^n 米。
+   */
+  function buildContours() {
+    const { nx, nz, depth, min, max } = S.grid, g = S.geo;
+    const step = niceStep((max - min) / 12);
+    const lift = (max - min) * 0.004 + 0.05;         // 稍微抬高，避免和地形表面打架
+    const cw = g.widthM / (nx - 1), ch = g.heightM / (nz - 1);
+    const verts = [];
+    const pts = [];
+    for (let j = 0; j < nz - 1; j++) {
+      for (let i = 0; i < nx - 1; i++) {
+        const a = depth[j * nx + i],           b = depth[j * nx + i + 1];
+        const c = depth[(j + 1) * nx + i + 1], d = depth[(j + 1) * nx + i];
+        const lo = Math.min(a, b, c, d), hi = Math.max(a, b, c, d);
+        if (hi === lo) continue;
+        const x0 = i * cw - g.widthM / 2, z0 = j * ch - g.heightM / 2;
+        for (let L = Math.ceil(lo / step) * step; L < hi; L += step) {
+          pts.length = 0;
+          // 四条边：上(a-b) 右(b-c) 下(d-c) 左(a-d)，等值线穿过则线性插值出交点
+          if ((a < L) !== (b < L)) pts.push(x0 + cw * (L - a) / (b - a), z0);
+          if ((b < L) !== (c < L)) pts.push(x0 + cw, z0 + ch * (L - b) / (c - b));
+          if ((d < L) !== (c < L)) pts.push(x0 + cw * (L - d) / (c - d), z0 + ch);
+          if ((a < L) !== (d < L)) pts.push(x0, z0 + ch * (L - a) / (d - a));
+          for (let k = 0; k + 3 < pts.length; k += 4) {
+            verts.push(pts[k], -L + lift, pts[k + 1], pts[k + 2], -L + lift, pts[k + 3]);
+          }
+        }
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+      color: 0x2f6bff, transparent: true, opacity: 0.55, depthWrite: false }));
+    contourGroup.add(lines);
+    contourGroup.userData.step = step;
+  }
+
+  /* ==========================================================================
+   * 第 6 段：标记 / 区域 / 洋流箭头
+   * ======================================================================== */
+
+  /** 四类标记各用一个 InstancedMesh（形状 + 颜色区分），同类再多也只有一次绘制调用 */
+  function buildMarkers() {
+    const list = (S.cfg.markers || []).filter(m => typeof m.lat === 'number' && typeof m.lng === 'number');
+    const shapes = {
+      entry:   () => { const g = new THREE.ConeGeometry(0.6, 1.7, 14); g.rotateX(Math.PI); return g; },       // 倒锥：入水点
+      anchor:  () => { const g = new THREE.BoxGeometry(0.95, 0.95, 0.95); g.rotateY(Math.PI / 4); return g; }, // 方块：锚点
+      view:    () => new THREE.SphereGeometry(0.62, 18, 12),                                                  // 圆球：观景点
+      warning: () => new THREE.OctahedronGeometry(0.85),                                                      // 菱形：危险点
+    };
+    for (const type of Object.keys(MARKER_TYPES)) {
+      const items = list.filter(m => m.type === type);
+      if (!items.length) continue;
+      const mat = new THREE.MeshLambertMaterial({ color: MARKER_TYPES[type].color,
+        emissive: MARKER_TYPES[type].color, emissiveIntensity: 0.45, fog: false });
+      const mesh = new THREE.InstancedMesh(shapes[type](), mat, items.length);
+      mesh.userData.items = items.map(m => ({ ...m, ...lngLatToXZ(m.lng, m.lat) }));
+      mesh.frustumCulled = false;
+      markerGroup.add(mesh);
+    }
+    updateMarkers();
+  }
+
+  /** 标记位置随高度夸张更新。标记贴在地形表面上方；卡片里显示的深度以 JSON 填写的为准 */
+  const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3();
+  function updateMarkers() {
+    if (!S.grid) return;
+    const size = S.geo.span * 0.013;
+    markerGroup.children.forEach(mesh => {
+      mesh.userData.items.forEach((it, i) => {
+        const y = -sampleDepth(it.x, it.z) * S.exag + size * 1.3;
+        _m4.compose(_v.set(it.x, y, it.z), _q.identity(), _s.setScalar(size));
+        mesh.setMatrixAt(i, _m4);
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingSphere();      // 射线拾取需要最新的包围球
+    });
+  }
+
+  /**
+   * 区域多边形：贴地着色。
+   * 做法：把地形网格按步长抽稀，中心点落在多边形内的格子生成两个三角形，高度取自地形，
+   * 这样色块会跟着礁盘、断崖起伏，而不是一张穿过地形的平板。
+   */
+  function buildZones() {
+    const { nx, nz, depth } = S.grid, g = S.geo;
+    const stride = Math.max(1, Math.ceil((Math.max(nx, nz) - 1) / 256));
+    const lift = (S.grid.max - S.grid.min) * 0.006 + 0.1;
+    const cw = g.widthM / (nx - 1), ch = g.heightM / (nz - 1);
+    // 生成一块贴地色块：inside(cx, cz, 平均深度) 返回 true 的格子才会被铺上
+    const addZone = (zone, def, inside, box) => {
+      const verts = [];
+      const P = (i, j) => [i * cw - g.widthM / 2, -depth[j * nx + i] + lift, j * ch - g.heightM / 2];
+      for (let j = 0; j < nz - 1; j += stride) {
+        const j2 = Math.min(j + stride, nz - 1);
+        for (let i = 0; i < nx - 1; i += stride) {
+          const i2 = Math.min(i + stride, nx - 1);
+          const cx = (i + i2) / 2 * cw - g.widthM / 2, cz = (j + j2) / 2 * ch - g.heightM / 2;
+          if (box && (cx < box[0] || cx > box[1] || cz < box[2] || cz > box[3])) continue;      // 先用外包矩形快速排除
+          const dAvg = (depth[j * nx + i] + depth[j * nx + i2] + depth[j2 * nx + i] + depth[j2 * nx + i2]) / 4;
+          if (!inside(cx, cz, dAvg)) continue;
+          const a = P(i, j), b = P(i2, j), c = P(i2, j2), d = P(i, j2);
+          verts.push(...a, ...d, ...b, ...b, ...d, ...c);
+        }
+      }
+      if (!verts.length) return;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+      const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        color: def.color, transparent: true, opacity: 0.36, depthWrite: false, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+      mesh.renderOrder = 2;
+      mesh.userData.zone = zone;
+      zoneGroup.add(mesh);
+    };
+    // ① JSON 里手绘的多边形区域
+    (S.cfg.zones || []).forEach(zone => {
+      const def = ZONE_TYPES[zone.type];
+      if (!def || !Array.isArray(zone.points) || zone.points.length < 3) return;
+      const poly = zone.points.map(p => { const q = lngLatToXZ(p[0], p[1]); return [q.x, q.z]; });
+      const xs = poly.map(p => p[0]), zs = poly.map(p => p[1]);
+      addZone(zone, def, (cx, cz) => pointInPolygon(cx, cz, poly), [Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)]);
+    });
+    // ② 可选扩展 depthBands：按深度分带自动着色（例如 0–18 m 绿、18–30 m 黄、30 m 以深红），不需要手绘多边形
+    (S.cfg.depthBands || []).forEach(band => {
+      const def = ZONE_TYPES[band.type];
+      if (!def || typeof band.from !== 'number' || typeof band.to !== 'number') return;
+      addZone(band, def, (cx, cz, d) => d >= band.from && d < band.to, null);
+    });
+  }
+
+  /**
+   * 洋流箭头图层（季节洋流、实时洋流共用）。
+   * 每个箭头 = 箭杆 + 箭头，两者各用一个 InstancedMesh，N 个箭头只需 2 次绘制调用。
+   * 方向：dir 为流向（水流去往的方向），正北 0°、顺时针；长度：随流速线性变长。
+   */
+  function buildArrowLayer(group, samples, color) {
+    clearGroup(group);
+    const list = (samples || []).filter(c => [c.lng, c.lat, c.dir, c.speed].every(v => typeof v === 'number' && isFinite(v)));
+    if (!list.length) return;
+    const shaftGeo = new THREE.BoxGeometry(1, 0.16, 0.16); shaftGeo.translate(0.5, 0, 0);     // 单位长度，起点在原点，沿 +X
+    const headGeo  = new THREE.ConeGeometry(0.42, 0.9, 12); headGeo.rotateZ(-Math.PI / 2);    // 锥尖指向 +X
+    const mat = new THREE.MeshBasicMaterial({ color, fog: false });
+    const shaft = new THREE.InstancedMesh(shaftGeo, mat, list.length);
+    const head  = new THREE.InstancedMesh(headGeo, mat, list.length);
+    shaft.frustumCulled = head.frustumCulled = false;
+    group.add(shaft, head);
+    group.userData.items = list.map(c => ({ ...c, ...lngLatToXZ(c.lng, c.lat) }));
+    updateArrowLayer(group);
+  }
+  const _e = new THREE.Euler();
+  function updateArrowLayer(group) {
+    const items = group.userData.items;
+    if (!items || group.children.length < 2 || !S.grid) return;
+    const [shaft, head] = group.children;
+    const L0 = S.geo.span * 0.03;                       // 箭头基准尺寸
+    items.forEach((it, i) => {
+      const len = L0 * (0.4 + 1.6 * Math.min(it.speed, 2.5));     // 流速 → 箭杆长度（m/s 线性映射，2.5 m/s 封顶）
+      const rad = it.dir * Math.PI / 180;
+      const dx = Math.sin(rad), dz = -Math.cos(rad);              // 流向单位向量（北 = -Z）
+      _q.setFromEuler(_e.set(0, Math.PI / 2 - rad, 0));           // 把 +X 轴转到流向
+      const y = Math.max(-sampleDepth(it.x, it.z), -1e9) * S.exag + L0 * 0.7;   // 悬在海底上方一点
+      _m4.compose(_v.set(it.x, y, it.z), _q, _s.set(len, L0 * 0.5, L0 * 0.5));
+      shaft.setMatrixAt(i, _m4);
+      _m4.compose(_v.set(it.x + dx * (len + L0 * 0.2), y, it.z + dz * (len + L0 * 0.2)), _q, _s.setScalar(L0 * 0.5));
+      head.setMatrixAt(i, _m4);
+    });
+    shaft.instanceMatrix.needsUpdate = head.instanceMatrix.needsUpdate = true;
+  }
+
+  function buildSeasonCurrents() {
+    const sc = S.cfg.seasonCurrents || {};
+    buildArrowLayer(seasonGroup, sc[S.season], 0xe8fbff);
+  }
+
+  /* ==========================================================================
+   * 第 7 段：潜点加载 / 卸载
+   * ======================================================================== */
+
+  /** 卸载当前潜点的全部内容（地形、标记、区域、箭头、工具） */
+  function disposeSpot() {
+    cancelTool();
+    closeProfile(); $('measureBox').hidden = true; $('card').hidden = true;
+    if (terrainMesh) { scaledGroup.remove(terrainMesh); terrainMesh.geometry.dispose(); terrainMesh.material.dispose(); terrainMesh = null; }
+    if (waterMesh) { scene.remove(waterMesh); waterMesh.geometry.dispose(); waterMesh = null; }      // 水面材质是共用的，不销毁
+    clearSatellite();
+    [contourGroup, zoneGroup, toolGroup, markerGroup, seasonGroup, realtimeGroup].forEach(clearGroup);
+    seasonGroup.userData.items = realtimeGroup.userData.items = null;
+    S.grid = null; S.cfg = null; S.geo = null;
+    // 在线附加层的 UI 也复位
+    $('rowRealtime').hidden = true; $('tide').hidden = true; $('rtStatus').textContent = ''; $('spotSource').textContent = '';
+  }
+
+  /** 加载一个潜点：JSON → 高度图 → 地形 → 各图层。在线数据在最后单独发起，不参与这条主流程 */
+  async function loadSpot(id) {
+    const token = ++S.loadToken;
+    disposeSpot();
+    S.spotId = id;
+    showLoading('读取潜点配置…', 8);
+
+    // 1) 本地 JSON
+    let cfg;
+    try { cfg = await fetchJSON(CONFIG.paths.data(id), 8000); }
+    catch (e) { if (token === S.loadToken) failLoading(`没能读取潜点配置 ${CONFIG.paths.data(id)}。\n请确认文件存在且是合法 JSON。可以先切换到其它潜点。`); return; }
+    if (token !== S.loadToken) return;
+    S.cfg = cfg; S.geo = computeGeo(cfg);
+    $('spotSource').textContent = cfg.source ? '数据来源：' + cfg.source : '';
+
+    // 2) 本地高度图（带进度）
+    showLoading('下载高程图…', 20);
+    let img;
+    try { img = await loadImageWithProgress(CONFIG.paths.heightmap(id), p => { if (token === S.loadToken) $('loadBar').style.width = (20 + p * 45) + '%'; }); }
+    catch (e) { if (token === S.loadToken) failLoading(`没能加载高程图 ${CONFIG.paths.heightmap(id)}。\n请确认文件存在且是 PNG 灰度图。可以先切换到其它潜点。`); return; }
+    if (token !== S.loadToken) return;
+
+    // 3) 解析 + 生成地形（中间让出一帧，保证进度条能刷新，页面不假死）
+    showLoading('解析高度图、生成地形…', 70); await nextFrame();
+    try {
+      const r = cfg.depthRange || {};
+      const range = { min: typeof r.min === 'number' ? r.min : CONFIG.fallbackDepthRange.min,
+                      max: typeof r.max === 'number' ? r.max : CONFIG.fallbackDepthRange.max };
+      S.grid = parseHeightmap(img, range);
+      buildTerrain();
+      showLoading('生成等深线、标记与区域…', 85); await nextFrame();
+      buildContours(); buildZones(); buildMarkers(); buildSeasonCurrents();
+    } catch (e) {
+      console.warn('[sandbox] 地形生成失败', e);
+      if (token === S.loadToken) failLoading('地形生成失败，高程图或配置内容可能有问题。可以先切换到其它潜点。');
+      return;
+    }
+
+    fitSceneToSpot(); applyExaggeration(); applyFog(); applyLayerVisibility(); applyRealism(); resetView();
+    hideLoading();
+    loadSatellite(token);           // 卫星贴图：独立异步，不阻塞
+
+    // 4) 在线附加层：不 await，失败与否都不影响上面已经渲染好的沙盘
+    refreshOnline();
+  }
+
+  /** 按潜点尺寸调整相机裁剪面、缩放范围、灯光与阴影范围 */
+  function fitSceneToSpot() {
+    const span = S.geo.span;
+    camera.near = span / 2000; camera.far = span * 30; camera.updateProjectionMatrix();
+    controls.minDistance = span * 0.03; controls.maxDistance = span * 4;
+    sun.position.set(-span * 0.55, span * 1.0, -span * 0.35); sun.target.position.set(0, 0, 0);
+    FX.uSunDir.value.copy(sun.position).normalize();
+    const sc = sun.shadow.camera;
+    sc.left = sc.bottom = -span * 0.8; sc.right = sc.top = span * 0.8; sc.near = span * 0.05; sc.far = span * 3;
+    sc.updateProjectionMatrix();
+    sun.shadow.bias = -0.0008; sun.shadow.normalBias = span / 800;
+    fill.position.set(span * 0.6, span * 0.5, span * 0.7);
+  }
+
+  /* ==========================================================================
+   * 第 7.5 段：卫星影像贴图（本地优先，在线可选）与写实模式开关
+   * ======================================================================== */
+  function loadImage(src) {
+    return new Promise((resolve, reject) => { const im = new Image(); im.onload = () => resolve(im); im.onerror = () => reject(new Error('image')); im.src = src; });
+  }
+  function applySatellite(img, token) {
+    if (token !== S.loadToken || !terrainMesh) return;
+    if (FX.uSat.value !== blankTex) FX.uSat.value.dispose();
+    const t = new THREE.Texture(img);
+    t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = renderer.capabilities.getMaxAnisotropy(); t.needsUpdate = true;
+    FX.uSat.value = t;
+    $('rowSat').hidden = false;
+    applyRealism();
+  }
+  function clearSatellite() {
+    if (FX.uSat.value !== blankTex) { FX.uSat.value.dispose(); FX.uSat.value = blankTex; }
+    FX.uSatMix.value = 0; $('rowSat').hidden = true; $('satCredit').hidden = true;
+  }
+  /** 不被 loadSpot await：任何一步失败都只是“没有卫星贴图”，继续用程序化纹理 */
+  async function loadSatellite(token) {
+    const id = S.spotId, b = S.geo;
+    // ① 本地 textures/[spotId].jpg（离线可用）
+    let localImg = null;
+    try { localImg = await loadImage(CONFIG.paths.texture(id)); } catch (e) { /* 没有本地贴图 */ }
+    if (localImg) applySatellite(localImg, token);
+    if (!SATELLITE_CONFIG.enabled || !S.cfg.bounds) return;      // 没有准确 bounds 就没法对齐影像
+    const k = SATELLITE_CONFIG.maxSize / Math.max(b.widthM, b.heightM);
+    const url = SATELLITE_CONFIG.url(b, Math.round(b.widthM * k), Math.round(b.heightM * k));
+    try {
+      // ② 浏览器缓存里上次下载的高清图（下载过一次，之后断网也能用）
+      let cache = null, res = null;
+      try { cache = await caches.open('seabed-sat-v1'); res = await cache.match(url); } catch (e) { /* 浏览器不支持缓存 */ }
+      // ③ 在线下载（带超时）
+      if (!res) {
+        if (navigator.onLine === false) return;
+        const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), SATELLITE_CONFIG.timeoutMs);
+        try { res = await fetch(url, { signal: ctl.signal }); } finally { clearTimeout(timer); }
+        if (!res.ok || !(res.headers.get('content-type') || '').startsWith('image/')) throw new Error('bad response');
+        if (cache) cache.put(url, res.clone()).catch(() => {});
+      }
+      const objUrl = URL.createObjectURL(await res.blob());
+      try { applySatellite(await loadImage(objUrl), token); } finally { URL.revokeObjectURL(objUrl); }
+    } catch (e) {
+      console.info('[sandbox] 在线卫星影像不可用，保持本地贴图 / 程序化纹理：', e && e.name);
+    }
+  }
+
+  /** 写实模式 / 卫星贴图开关统一在这里生效 */
+  function applyRealism() {
+    const real = $('chkReal').checked, hasSat = !$('rowSat').hidden;
+    FX.uReal.value = real ? 1 : 0;
+    FX.uSatMix.value = hasSat && $('chkSat').checked ? 1 : 0;
+    if (waterMesh) waterMesh.material = real ? waterMatReal : waterMatPlain;
+    // 写实模式下把分区色块和等深线调淡，不盖住纹理
+    zoneGroup.children.forEach(m => { m.material.opacity = real ? 0.16 : 0.36; });
+    contourGroup.children.forEach(l => { l.material.opacity = real ? 0.30 : 0.55; });
+    $('satCredit').hidden = !FX.uSatMix.value;
+    $('satCredit').textContent = SATELLITE_CONFIG.credit;
+  }
+  $('chkReal').onchange = applyRealism;
+  $('chkSat').onchange = applyRealism;
+
+  /* ==========================================================================
+   * 第 8 段：控制项（高度夸张 / 雾 / 图层开关 / 视角 / 截图）
+   * ======================================================================== */
+
+  function applyExaggeration() {
+    scaledGroup.scale.y = Math.max(S.exag, 0.001);     // 不取 0，避免矩阵不可逆导致射线拾取失效
+    updateMarkers(); updateArrowLayer(seasonGroup); updateArrowLayer(realtimeGroup);
+    renderer.shadowMap.needsUpdate = true;             // 地形形状变了，阴影重算一次
+  }
+  $('exag').oninput = e => { S.exag = Number(e.target.value); $('exagOut').textContent = S.exag.toFixed(1) + '×'; applyExaggeration(); };
+
+  function applyFog() {
+    const v = Number($('fog').value); $('fogOut').textContent = v;
+    const span = S.geo ? S.geo.span : 2000;
+    scene.fog.density = (v / 100) * 2.2 / span;        // 浓度按潜点尺寸归一化，大小潜点观感一致
+  }
+  $('fog').oninput = applyFog;
+
+  /** 图层开关：关闭即把整组 visible 设为 false，几何体不再提交给 GPU */
+  function applyLayerVisibility() {
+    contourGroup.visible  = $('chkContour').checked;
+    if (waterMesh) waterMesh.visible = $('chkWater').checked;
+    markerGroup.visible   = $('chkMarkers').checked;
+    zoneGroup.visible     = $('chkZones').checked;
+    seasonGroup.visible   = $('chkSeason').checked;
+    realtimeGroup.visible = $('chkRealtime').checked && !$('rowRealtime').hidden;
+    if (!markerGroup.visible && !zoneGroup.visible) $('card').hidden = true;
+  }
+  ['chkContour', 'chkWater', 'chkMarkers', 'chkZones', 'chkSeason', 'chkRealtime'].forEach(id => $(id).onchange = applyLayerVisibility);
+
+  function setSeason(s) {
+    S.season = s;
+    $('btnDry').classList.toggle('active', s === 'dry'); $('btnRainy').classList.toggle('active', s === 'rainy');
+    if (S.grid) buildSeasonCurrents();
+  }
+  $('btnDry').onclick = () => setSeason('dry');
+  $('btnRainy').onclick = () => setSeason('rainy');
+
+  /** 重置到默认最佳视角：从南偏东上方斜向俯视整个潜点 */
+  function resetView() {
+    if (!S.geo) return;
+    const span = S.geo.span, mid = S.grid ? (S.grid.min + S.grid.max) / 2 : 0;
+    controls.target.set(0, -mid * S.exag * 0.5, 0);
+    camera.position.set(span * 0.18, span * 0.72, span * 0.88);
+    controls.update();
+  }
+  $('btnReset').onclick = resetView;
+
+  /** 截图：先同步渲染一帧，再立刻导出 PNG 并触发下载 */
+  $('btnShot').onclick = () => {
+    renderer.render(scene, camera);
+    renderer.domElement.toBlob(blob => {
+      if (!blob) return;
+      const a = document.createElement('a');
+      const t = new Date(), p = n => String(n).padStart(2, '0');
+      a.download = `${S.spotId || 'seabed'}-${t.getFullYear()}${p(t.getMonth() + 1)}${p(t.getDate())}-${p(t.getHours())}${p(t.getMinutes())}${p(t.getSeconds())}.png`;
+      a.href = URL.createObjectURL(blob);
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    }, 'image/png');
+  };
+
+  /* ==========================================================================
+   * 第 9 段：鼠标拾取（悬浮卡片 + 工具点击）
+   * ======================================================================== */
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  function setRay(ev) {
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+  }
+
+  /** 用 textContent 组装卡片，JSON 里的文字不会被当成 HTML 执行 */
+  function showCard(ev, title, iconType, depthText, note) {
+    const card = $('card'); card.textContent = '';
+    const t = document.createElement('div'); t.className = 't';
+    if (iconType) {
+      const img = document.createElement('img'); img.src = CONFIG.paths.icons + iconType + '.svg'; img.alt = '';
+      img.onerror = () => img.remove();              // 图标缺失就不显示，不报错
+      t.appendChild(img);
+    }
+    t.appendChild(document.createTextNode(title)); card.appendChild(t);
+    if (depthText) { const d = document.createElement('div'); d.className = 'd'; d.textContent = depthText; card.appendChild(d); }
+    if (note) { const n = document.createElement('div'); n.className = 'n'; n.textContent = note; card.appendChild(n); }
+    card.hidden = false;
+    const w = card.offsetWidth, h = card.offsetHeight;
+    card.style.left = Math.min(ev.clientX + 14, window.innerWidth - w - 8) + 'px';
+    card.style.top  = Math.min(ev.clientY + 14, window.innerHeight - h - 8) + 'px';
+  }
+
+  let hoverEvent = null, hoverQueued = false, pointerIsDown = false;
+  function doHover() {
+    hoverQueued = false;
+    const ev = hoverEvent;
+    if (!ev || !S.grid || pointerIsDown) { $('card').hidden = true; return; }
+    setRay(ev);
+    // 先找标记
+    if (markerGroup.visible) {
+      const hit = raycaster.intersectObjects(markerGroup.children, false)[0];
+      if (hit && hit.instanceId != null) {
+        const it = hit.object.userData.items[hit.instanceId];
+        const def = MARKER_TYPES[it.type];
+        const depth = typeof it.depth === 'number' ? `深度 ${it.depth} m` : `深度约 ${sampleDepth(it.x, it.z).toFixed(1)} m（取自地形）`;
+        showCard(ev, def.label, it.type, depth, it.note || '');
+        return;
+      }
+    }
+    // 再找区域
+    if (zoneGroup.visible && !S.tool) {
+      const hit = raycaster.intersectObjects(zoneGroup.children, false)[0];
+      if (hit) {
+        const z = hit.object.userData.zone;
+        showCard(ev, z.label || ZONE_TYPES[z.type].label, null, '', z.note || '');
+        return;
+      }
+    }
+    $('card').hidden = true;
+  }
+  renderer.domElement.addEventListener('pointermove', ev => {
+    hoverEvent = ev;
+    if (!hoverQueued) { hoverQueued = true; requestAnimationFrame(doHover); }   // 每帧最多拾取一次
+  });
+  renderer.domElement.addEventListener('pointerleave', () => { hoverEvent = null; $('card').hidden = true; });
+
+  // 区分“点击”和“拖拽旋转”：按下与抬起位置相差很小才算点击
+  let downX = 0, downY = 0;
+  renderer.domElement.addEventListener('pointerdown', ev => { pointerIsDown = true; downX = ev.clientX; downY = ev.clientY; $('card').hidden = true; });
+  window.addEventListener('pointerup', ev => {
+    const wasDown = pointerIsDown; pointerIsDown = false;
+    if (!wasDown || ev.button !== 0 || !S.tool || !terrainMesh) return;
+    if (Math.hypot(ev.clientX - downX, ev.clientY - downY) > 5) return;
+    setRay(ev);
+    const hit = raycaster.intersectObject(terrainMesh, false)[0];
+    if (hit) onToolPoint(hit.point.x, hit.point.z);
+  });
+
+  /* ==========================================================================
+   * 第 10 段：测距工具 & 剖面工具
+   * ======================================================================== */
+  const TOOL_TEXT = {
+    measure: ['测距：在地形上点击第 1 个点', '测距：再点击第 2 个点'],
+    profile: ['剖面：在地形上点击起点 A', '剖面：再点击终点 B'],
+  };
+  function setTool(name) {
+    const next = S.tool === name ? null : name;        // 再点一次同一个按钮 = 退出
+    cancelTool(); closeProfile();
+    S.tool = next;
+    $('btnMeasure').classList.toggle('active', next === 'measure');
+    $('btnProfile').classList.toggle('active', next === 'profile');
+    stage.classList.toggle('tool-active', !!next);
+    $('toolHint').hidden = !next;
+    if (next) $('toolHintText').textContent = TOOL_TEXT[next][0];
+  }
+  /** 取消当前工具：清掉画的线和结果窗口 */
+  function cancelTool() {
+    S.tool = null; S.toolPts = [];
+    clearGroup(toolGroup);
+    $('btnMeasure').classList.remove('active'); $('btnProfile').classList.remove('active');
+    stage.classList.remove('tool-active');
+    $('toolHint').hidden = true; $('measureBox').hidden = true;
+  }
+  $('btnMeasure').onclick = () => setTool('measure');
+  $('btnProfile').onclick = () => setTool('profile');
+  $('btnToolCancel').onclick = () => { cancelTool(); closeProfile(); };
+  $('measureClose').onclick = cancelTool;
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') { cancelTool(); } });
+
+  /** 在 toolGroup 里画点和线。toolGroup 位于 scaledGroup 内，所以 y 直接写 -深度，自动跟随高度夸张 */
+  function drawToolGeometry(points, pathPoints) {
+    clearGroup(toolGroup);
+    const lift = (S.grid.max - S.grid.min) * 0.01 + 0.2;
+    const pGeo = new THREE.BufferGeometry();
+    pGeo.setAttribute('position', new THREE.Float32BufferAttribute(points.flatMap(p => [p.x, -p.depth + lift, p.z]), 3));
+    const dots = new THREE.Points(pGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 9, sizeAttenuation: false, depthTest: false, fog: false }));
+    dots.renderOrder = 20; toolGroup.add(dots);
+    if (pathPoints && pathPoints.length > 1) {
+      const lGeo = new THREE.BufferGeometry();
+      lGeo.setAttribute('position', new THREE.Float32BufferAttribute(pathPoints.flatMap(p => [p.x, -p.depth + lift, p.z]), 3));
+      const line = new THREE.Line(lGeo, new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, fog: false }));   // 白色连线
+      line.renderOrder = 19; toolGroup.add(line);
+    }
+  }
+
+  function onToolPoint(x, z) {
+    if (S.toolPts.length >= 2) S.toolPts = [];           // 已有结果时再点击 = 重新开始
+    S.toolPts.push({ x, z, depth: sampleDepth(x, z) });
+    if (S.toolPts.length === 1) {
+      $('measureBox').hidden = true;
+      drawToolGeometry(S.toolPts, null);
+      $('toolHintText').textContent = TOOL_TEXT[S.tool][1];
+      return;
+    }
+    const [a, b] = S.toolPts;
+    if (S.tool === 'measure') {
+      const r = computeDistance(a, b);
+      drawToolGeometry([a, b], [a, b]);
+      $('mDist').textContent  = r.horizontal.toFixed(1) + ' m';
+      $('mDepth').textContent = r.depthDiff.toFixed(1) + ' m';
+      $('mSlope').textContent = r.slopePct.toFixed(1) + ' %';
+      $('measureBox').hidden = false;
+      $('toolHintText').textContent = '测距完成：继续点击可重新测量';
+    } else {
+      const prof = computeProfile(a, b);
+      drawToolGeometry([a, b], prof.samples);
+      showProfile(prof);
+      $('toolHintText').textContent = '剖面完成：继续点击可重新选线';
+    }
+  }
+
+  /**
+   * 【距离计算】两点间的水平距离、深度差、坡度。
+   * 世界坐标单位就是米，所以水平距离 = XZ 平面上的直线距离；
+   * 深度用真实深度（不受高度夸张影响）；坡度% = 深度差 / 水平距离 × 100。
+   */
+  function computeDistance(a, b) {
+    const horizontal = Math.hypot(b.x - a.x, b.z - a.z);
+    const depthDiff = Math.abs(b.depth - a.depth);
+    const slopePct = horizontal > 0.01 ? depthDiff / horizontal * 100 : 0;
+    return { horizontal, depthDiff, slopePct };
+  }
+
+  /**
+   * 【剖面计算】沿 A→B 连线等间距取样，每个样点在深度网格上做双线性插值。
+   * 采样数按连线跨过的网格数自适应（约每格 2 个样点，64~600 之间），既不漏细节也不浪费。
+   * 返回 samples = [{x, z, depth, dist(距 A 的水平距离 m)}]
+   */
+  function computeProfile(a, b) {
+    const total = Math.hypot(b.x - a.x, b.z - a.z);
+    const cell = Math.min(S.geo.widthM / (S.grid.nx - 1), S.geo.heightM / (S.grid.nz - 1));
+    const n = clamp(Math.round(total / cell * 2), 64, 600);
+    const samples = [];
+    let minD = Infinity, maxD = -Infinity;
+    for (let i = 0; i <= n; i++) {
+      const t = i / n, x = a.x + (b.x - a.x) * t, z = a.z + (b.z - a.z) * t;
+      const depth = sampleDepth(x, z);
+      samples.push({ x, z, depth, dist: total * t });
+      if (depth < minD) minD = depth; if (depth > maxD) maxD = depth;
+    }
+    return { samples, total, minD, maxD };
+  }
+
+  /** 在右侧窗口里画 2D 剖面折线图：X = 水平距离，Y = 深度（向下为深） */
+  function showProfile(prof) {
+    $('profile').hidden = false;
+    $('profileTitle').textContent = `地形剖面 A → B · 水平 ${prof.total.toFixed(0)} m · 深度 ${prof.minD.toFixed(1)} ~ ${prof.maxD.toFixed(1)} m`;
+    const cv = $('profileCanvas'), dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = cv.clientWidth, H = cv.clientHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+    const m = { l: 44, r: 12, t: 10, b: 30 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const y0 = Math.min(0, prof.minD);                                   // 纵轴从海面（或更高的陆地）开始
+    const y1 = Math.max(prof.maxD, y0 + 1) + (prof.maxD - y0) * 0.08;    // 底部留一点余量
+    const X = d => m.l + (prof.total > 0 ? d / prof.total : 0) * pw;
+    const Y = d => m.t + (d - y0) / (y1 - y0) * ph;
+
+    // 水体底色
+    g.fillStyle = 'rgba(57,182,232,0.14)'; g.fillRect(m.l, Y(Math.max(0, y0)), pw, m.t + ph - Y(Math.max(0, y0)));
+    // 网格线与刻度
+    g.font = '11px sans-serif'; g.lineWidth = 1;
+    const ys = niceStep((y1 - y0) / 5), xs = niceStep(prof.total / 6);
+    g.textAlign = 'right'; g.textBaseline = 'middle';
+    for (let v = Math.ceil(y0 / ys) * ys; v <= y1; v += ys) {
+      g.strokeStyle = 'rgba(255,255,255,0.10)'; g.beginPath(); g.moveTo(m.l, Y(v)); g.lineTo(m.l + pw, Y(v)); g.stroke();
+      g.fillStyle = 'rgba(255,255,255,0.7)'; g.fillText(v.toFixed(ys < 1 ? 1 : 0), m.l - 5, Y(v));
+    }
+    g.textAlign = 'center'; g.textBaseline = 'top';
+    for (let v = 0; v <= prof.total; v += xs) {
+      g.strokeStyle = 'rgba(255,255,255,0.10)'; g.beginPath(); g.moveTo(X(v), m.t); g.lineTo(X(v), m.t + ph); g.stroke();
+      g.fillStyle = 'rgba(255,255,255,0.7)'; g.fillText(v.toFixed(0), X(v), m.t + ph + 4);
+    }
+    // 海底实体填充
+    g.beginPath(); g.moveTo(X(0), m.t + ph);
+    prof.samples.forEach(s => g.lineTo(X(s.dist), Y(s.depth)));
+    g.lineTo(X(prof.total), m.t + ph); g.closePath();
+    g.fillStyle = 'rgba(12,40,66,0.95)'; g.fill();
+    // 海底折线
+    g.beginPath(); prof.samples.forEach((s, i) => i ? g.lineTo(X(s.dist), Y(s.depth)) : g.moveTo(X(s.dist), Y(s.depth)));
+    g.strokeStyle = '#8fd8ff'; g.lineWidth = 2; g.stroke();
+    // 坐标轴说明
+    g.fillStyle = 'rgba(255,255,255,0.55)'; g.textAlign = 'right'; g.textBaseline = 'bottom';
+    g.fillText('水平距离 (m)', m.l + pw, H - 1);
+    g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('深度 (m)', 2, 0);
+    g.fillStyle = '#fff'; g.textBaseline = 'bottom';
+    g.fillText('A', X(0) + 3, Y(prof.samples[0].depth) - 3);
+    g.textAlign = 'right'; g.fillText('B', X(prof.total) - 3, Y(prof.samples[prof.samples.length - 1].depth) - 3);
+  }
+  function closeProfile() { $('profile').hidden = true; }
+  $('profileClose').onclick = () => { closeProfile(); if (S.tool === 'profile') { S.toolPts = []; clearGroup(toolGroup); $('toolHintText').textContent = TOOL_TEXT.profile[0]; } };
+
+  /* ==========================================================================
+   * 第 11 段：可选在线图层（实时洋流 + 潮汐）
+   * 断网 / 超时降级流程（自查点）：
+   *   - 两个请求是互相独立的异步任务，都不被 loadSpot await，地形渲染永远先完成；
+   *   - fetchJSON 内置 AbortController，3 秒不返回即中断；
+   *   - 任何失败（断网、超时、HTTP 错误、数据格式不对）都进 catch：
+   *       实时洋流 → 隐藏实时开关与箭头，强制打开季节洋流图层；
+   *       潮汐     → 隐藏潮汐面板；
+   *     全程只写 console.info，不弹窗、不抛异常。
+   * ======================================================================== */
+  function refreshOnline() {
+    const token = S.loadToken;
+    if (!S.grid) return;
+    if (!API_CONFIG.enabled || navigator.onLine === false) {      // 明确离线：直接走降级，不发请求
+      realtimeFailed(token); tideFailed(token); return;
+    }
+    $('rtStatus').textContent = '正在尝试获取实时洋流…';
+    loadRealtimeCurrents(token);    // 不 await
+    loadTide(token);                // 不 await
+  }
+  $('btnRefresh').onclick = refreshOnline;
+
+  async function loadRealtimeCurrents(token) {
+    try {
+      const g = S.geo, n = API_CONFIG.sampleGrid, points = [];
+      for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+        points.push({ lng: g.west + (g.east - g.west) * (i + 0.5) / n, lat: g.south + (g.north - g.south) * (j + 0.5) / n });
+      }
+      const json = await fetchJSON(API_CONFIG.currentsUrl(points), API_CONFIG.timeoutMs);
+      if (token !== S.loadToken) return;                          // 期间已切换潜点，丢弃
+      const list = API_CONFIG.parseCurrents(json, points);
+      if (!list || !list.length) throw new Error('empty');
+      buildArrowLayer(realtimeGroup, list, 0xffa53a);             // 实时流用橙色，和季节流（白色）区分
+      $('rowRealtime').hidden = false; $('chkRealtime').checked = true;
+      const avg = list.reduce((s, c) => s + c.speed, 0) / list.length;
+      $('rtStatus').textContent = `实时洋流已加载（橙色箭头），平均流速约 ${avg.toFixed(2)} m/s。模型数据，仅供参考。`;
+      applyLayerVisibility();
+    } catch (e) {
+      console.info('[sandbox] 实时洋流不可用，已回退到季节洋流：', e && e.name);
+      realtimeFailed(token);
+    }
+  }
+  /** 实时洋流降级：隐藏控件 + 清空箭头 + 切回本地季节洋流 */
+  function realtimeFailed(token) {
+    if (token !== S.loadToken) return;
+    clearGroup(realtimeGroup); realtimeGroup.userData.items = null;
+    $('rowRealtime').hidden = true;
+    $('chkSeason').checked = true;
+    $('rtStatus').textContent = '当前使用本地季节洋流（实时数据未连接）。';
+    applyLayerVisibility();
+  }
+
+  async function loadTide(token) {
+    try {
+      const json = await fetchJSON(API_CONFIG.tideUrl(S.geo.cLat, S.geo.cLng), API_CONFIG.timeoutMs);
+      if (token !== S.loadToken) return;
+      const info = analyseTide(API_CONFIG.parseTide(json), Date.now());
+      if (!info) throw new Error('empty');
+      $('tideH').textContent = (info.height >= 0 ? '+' : '') + info.height.toFixed(2) + ' m';
+      $('tideTrend').textContent = info.rising ? '↑ 涨潮中' : '↓ 落潮中';
+      const t = info.next ? new Date(info.next.time) : null;
+      $('tideNext').textContent = t
+        ? `下一${info.next.isHigh ? '高潮' : '低潮'}：${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}（约 ${info.next.height >= 0 ? '+' : ''}${info.next.height.toFixed(2)} m，本机时间）`
+        : '';
+      $('tide').hidden = false;
+    } catch (e) {
+      console.info('[sandbox] 潮汐数据不可用，面板保持隐藏：', e && e.name);
+      tideFailed(token);
+    }
+  }
+  function tideFailed(token) { if (token === S.loadToken) $('tide').hidden = true; }
+
+  /**
+   * 从逐时海面高度序列里算出：当前潮高（两小时之间线性插值）、涨 / 落、下一个高潮或低潮。
+   * 逐时数据的极值时间精度约 ±30 分钟。
+   */
+  function analyseTide(series, now) {
+    if (!series) return null;
+    const { times, heights } = series;
+    let i = -1;
+    for (let k = 0; k < times.length - 1; k++) if (times[k] <= now && now < times[k + 1]) { i = k; break; }
+    if (i < 0 || heights[i] == null || heights[i + 1] == null) return null;
+    const f = (now - times[i]) / (times[i + 1] - times[i]);
+    const height = heights[i] + (heights[i + 1] - heights[i]) * f;
+    const rising = heights[i + 1] > heights[i];
+    let next = null;
+    for (let k = i + 1; k < times.length - 1; k++) {
+      if (heights[k] == null || heights[k + 1] == null || heights[k - 1] == null) break;
+      const isHigh = heights[k] >= heights[k - 1] && heights[k] > heights[k + 1];
+      const isLow  = heights[k] <= heights[k - 1] && heights[k] < heights[k + 1];
+      if ((rising && isHigh) || (!rising && isLow)) { next = { time: times[k], height: heights[k], isHigh }; break; }
+    }
+    return { height, rising, next };
+  }
+
+  /* ==========================================================================
+   * 第 12 段：潜点清单、图例、渲染循环、启动
+   * ======================================================================== */
+
+  /** 图例：优先用 assets/icons/ 里的图标，缺失时退回成纯色圆点 */
+  function buildLegend() {
+    const box = $('legend');
+    for (const [type, def] of Object.entries(MARKER_TYPES)) {
+      const span = document.createElement('span');
+      const img = document.createElement('img'); img.src = CONFIG.paths.icons + type + '.svg'; img.alt = '';
+      img.onerror = () => { const dot = document.createElement('i'); dot.style.background = hex(def.color); img.replaceWith(dot); };
+      span.append(img, document.createTextNode(def.label)); box.appendChild(span);
+    }
+  }
+
+  /** 读取潜点清单：data/index.json 优先，读不到就用内置清单 */
+  async function initSpotList() {
+    let spots = CONFIG.defaultSpots;
+    try {
+      const idx = await fetchJSON(CONFIG.paths.index, 4000);
+      const arr = Array.isArray(idx) ? idx : idx.spots;
+      if (Array.isArray(arr) && arr.length) spots = arr.filter(s => s && s.spotId);
+    } catch (e) { /* 没有清单文件属于正常情况 */ }
+    const sel = $('spotSelect');
+    spots.forEach(s => { const o = document.createElement('option'); o.value = s.spotId; o.textContent = s.name || s.spotId; sel.appendChild(o); });
+    sel.onchange = () => loadSpot(sel.value);     // 切换潜点：内部会先卸载旧地形和旧标记
+    // 支持 index.html?spot=xxx 直接打开指定潜点
+    const want = new URLSearchParams(location.search).get('spot');
+    if (want && spots.some(s => s.spotId === want)) sel.value = want;
+    if (spots.length) loadSpot(sel.value);
+  }
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+  // 浏览器网络状态变化：重新联网时自动再试一次；断网时立即降级
+  window.addEventListener('online', refreshOnline);
+  window.addEventListener('offline', refreshOnline);
+
+  const clock = new THREE.Clock();
+  renderer.setAnimationLoop(() => { FX.uTime.value = clock.getElapsedTime(); controls.update(); renderer.render(scene, camera); });
+
+  buildLegend();
+  initSpotList();
+
+  // 调试入口：控制台里可以用 window.__sandbox 查看状态
+  window.__sandbox = { S, scene, camera, controls, loadSpot, refreshOnline };
+}
+</script>
+</body>
+</html>
